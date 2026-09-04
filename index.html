@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="fr" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="MansotNote — gestion de notes Markdown et de tâches Kanban, style Notion/Obsidian." />
+    <meta name="color-scheme" content="dark light" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%236366f1'/%3E%3Ctext x='50' y='70' font-size='58' text-anchor='middle' fill='white' font-family='sans-serif'%3EM%3C/text%3E%3C/svg%3E"
+    />
+    <title>MansotNote</title>
+    <script>
+      // Applique le thème AVANT le premier rendu (anti-flash).
+      // Défaut : sombre. À synchroniser avec STORAGE_KEY.THEME (src/constants).
+      (function () {
+        try {
+          var t = localStorage.getItem('mansotnote.theme');
+          var dark = true;
+          if (t === 'light') dark = false;
+          if (t === 'system') {
+            dark = !window.matchMedia('(prefers-color-scheme: light)').matches;
+          }
+          document.documentElement.classList.toggle('dark', dark);
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+        } catch (e) {
+          /* localStorage indisponible : on garde le thème sombre par défaut */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

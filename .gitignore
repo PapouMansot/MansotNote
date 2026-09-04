@@ -1,0 +1,25 @@
+# Dépendances
+node_modules/
+
+# Build
+dist/
+dist-extension/
+dist-server/
+.pnpm-store/
+*.tar.gz
+*.local
+
+# Logs
+npm-debug.log*
+yarn-error.log*
+
+# OS / éditeurs
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Environnement
+.env
+.env.*
+!.env.example

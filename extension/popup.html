@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MansotNote Web Clipper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app-container">
+    <header class="header">
+      <div class="logo">
+        <span class="logo-icon">✨</span>
+        <span class="logo-title">MansotNote</span>
+      </div>
+      <div class="status" id="connection-status">Prêt</div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="note">📝 Note</button>
+      <button class="tab-btn" data-tab="correct">✍️ Correction</button>
+      <button class="tab-btn" data-tab="sia">🤖 SIA</button>
+      <button class="tab-btn" data-tab="kanban">📋 Kanban</button>
+      <button class="tab-btn" data-tab="settings">⚙️</button>
+    </div>
+
+    <!-- ================= Onglet 1 : Note & IA Markdown ================= -->
+    <section id="tab-note" class="tab-content active">
+      <div class="field-group">
+        <label for="note-title">Titre de la note</label>
+        <input type="text" id="note-title" placeholder="Titre...">
+      </div>
+
+      <div class="field-group">
+        <div class="field-header">
+          <label for="note-content">Contenu (Texte brut ou Sélection)</label>
+          <div class="ai-actions">
+            <button type="button" id="btn-ai-reformulate" class="btn-tool" title="Reformuler et structurer proprement en Markdown grâce à l'IA">
+              ✨ Structurer Markdown
+            </button>
+            <button type="button" id="btn-ai-summary" class="btn-tool" title="Résumer en points clés">
+              ⚡ Résumer
+            </button>
+            <button type="button" id="btn-note-preview" class="btn-tool" title="Afficher ou masquer le rendu Markdown">
+              👁 Aperçu
+            </button>
+          </div>
+        </div>
+        <textarea id="note-content" rows="6" placeholder="Contenu capturé ou éléments à reformuler..."></textarea>
+        <div id="note-markdown-preview" class="markdown-viewer" hidden></div>
+      </div>
+
+      <div class="field-group">
+        <label for="note-url">URL source</label>
+        <input type="text" id="note-url" readonly class="readonly-input">
+      </div>
+
+      <button id="btn-save-note" class="btn btn-primary">
+        <span>Enregistrer dans MansotNote</span>
+      </button>
+    </section>
+
+    <!-- ================= Onglet 2 : Correction Orthographe & Style ================= -->
+    <section id="tab-correct" class="tab-content">
+      <div class="field-group">
+        <label for="correct-input">Texte à corriger</label>
+        <textarea id="correct-input" rows="4" placeholder="Collez ou tapez le texte contenant des fautes..."></textarea>
+      </div>
+
+      <div class="field-actions">
+        <button type="button" id="btn-run-correct" class="btn btn-secondary">
+          <span>✨ Corriger l'orthographe & le style</span>
+        </button>
+      </div>
+
+      <div class="field-group">
+        <label for="correct-output">Texte corrigé</label>
+        <textarea id="correct-output" rows="4" placeholder="Le texte sans faute apparaîtra ici..." readonly></textarea>
+      </div>
+
+      <div class="action-grid">
+        <button id="btn-copy-correct" class="btn btn-secondary">
+          <span>📋 Copier</span>
+        </button>
+        <button id="btn-save-correct-note" class="btn btn-primary">
+          <span>📝 Enregistrer en Note</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- ================= Onglet 3 : SIA (Copilote IA) ================= -->
+    <section id="tab-sia" class="tab-content">
+      <div class="sia-chat-box" id="sia-messages">
+        <div class="sia-msg assistant">
+          <div class="sia-msg-author">🤖 SIA</div>
+          <div class="sia-msg-text">Bonjour ! Je m'appelle <strong>SIA</strong>, ton assistante copilote. Pose-moi une question, demande-moi d'analyser la page en cours ou de rédiger du contenu !</div>
+        </div>
+      </div>
+
+      <form id="sia-chat-form" class="sia-input-container">
+        <textarea id="sia-chat-input" rows="2" placeholder="Pose ta question à SIA..."></textarea>
+        <button type="submit" id="btn-sia-send" class="btn btn-primary btn-sm">
+          <span>Envoyer</span>
+        </button>
+      </form>
+    </section>
+
+    <!-- ================= Onglet 4 : Kanban ================= -->
+    <section id="tab-kanban" class="tab-content">
+      <div class="field-group">
+        <label for="task-title">Titre de la tâche</label>
+        <input type="text" id="task-title" placeholder="Ex: Lire l'article...">
+      </div>
+
+      <div class="field-group">
+        <label for="task-desc">Description / Extrait</label>
+        <textarea id="task-desc" rows="4" placeholder="Détails de la tâche..."></textarea>
+      </div>
+
+      <div class="field-group">
+        <label for="task-priority">Priorité</label>
+        <select id="task-priority">
+          <option value="low">Basse</option>
+          <option value="medium" selected>Moyenne</option>
+          <option value="high">Haute</option>
+          <option value="urgent">Urgente</option>
+        </select>
+      </div>
+
+      <button id="btn-save-task" class="btn btn-primary">
+        <span>Ajouter au Kanban</span>
+      </button>
+    </section>
+
+    <!-- ================= Onglet 5 : Réglages ================= -->
+    <section id="tab-settings" class="tab-content">
+      <div class="field-group">
+        <label for="cfg-app-url">URL de l'application MansotNote</label>
+        <input type="url" id="cfg-app-url" placeholder="https://notes.mansotfamily.fr">
+        <span class="hint">Toutes les requêtes (IA, Notes, Kanban) passent exclusivement par cette URL.</span>
+      </div>
+
+      <div class="field-group">
+        <label for="cfg-api-token">Token API MansotNote (Bearer Token)</label>
+        <input type="password" id="cfg-api-token" placeholder="mn_...">
+        <span class="hint">Généré dans l'application : Sécurité du compte → Tokens API.</span>
+      </div>
+
+      <div class="field-group">
+        <label for="cfg-ai-model">Modèle IA</label>
+        <input type="text" id="cfg-ai-model" placeholder="qwen3.8:9b-q6-32k">
+        <span class="hint">Modèle par défaut : qwen3.8:9b-q6-32k (avec accélération think: false).</span>
+      </div>
+
+      <button id="btn-save-config" class="btn btn-secondary">
+        <span>Enregistrer les réglages</span>
+      </button>
+    </section>
+
+    <footer class="footer">
+      <a href="#" id="link-open-app">Ouvrir MansotNote ↗</a>
+    </footer>
+  </div>
+
+  <script src="storage.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

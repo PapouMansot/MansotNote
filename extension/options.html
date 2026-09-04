@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Réglages MansotNote Web Clipper</title>
+  <style>
+    body {
+      background-color: #09090b;
+      color: #f4f4f5;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 40px 20px;
+      margin: 0;
+    }
+    .container {
+      max-width: 500px;
+      margin: 0 auto;
+      background: #18181b;
+      border: 1px solid #27272a;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    }
+    h1 {
+      font-size: 18px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    p {
+      color: #a1a1aa;
+      font-size: 13px;
+      line-height: 1.5;
+      margin-bottom: 20px;
+    }
+    .field {
+      margin-bottom: 16px;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: #d4d4d8;
+      margin-bottom: 6px;
+    }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      background: #09090b;
+      border: 1px solid #3f3f46;
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: #fff;
+      font-size: 14px;
+    }
+    input:focus {
+      border-color: #6366f1;
+      outline: none;
+    }
+    .btn {
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 10px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+    }
+    .btn:hover {
+      background: #4338ca;
+    }
+    .status {
+      margin-top: 12px;
+      font-size: 12px;
+      text-align: center;
+      color: #10b981;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>✨ MansotNote Web Clipper</h1>
+    <p>Configurez l'adresse de votre instance MansotNote pour synchroniser vos captures en un clic.</p>
+
+    <div class="field">
+      <label for="url">URL de votre instance MansotNote</label>
+      <input type="url" id="url" placeholder="https://notes.mansotfamily.fr">
+    </div>
+
+    <button id="save" class="btn">Enregistrer</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <script src="storage.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', async () => {
+      const cfg = await mnGetConfig({ appUrl: 'https://notes.mansotfamily.fr' });
+      document.getElementById('url').value = cfg.appUrl;
+
+      document.getElementById('save').addEventListener('click', async () => {
+        const val = document.getElementById('url').value.trim();
+        if (val) {
+          await mnSetConfig({ appUrl: val });
+          const st = document.getElementById('status');
+          st.textContent = 'Réglages enregistrés avec succès !';
+          setTimeout(() => st.textContent = '', 2500);
+        }
+      });
+    });
+  </script>
+</body>
+</html>

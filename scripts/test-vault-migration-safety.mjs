@@ -1,0 +1,16 @@
+import { readFileSync } from 'node:fs';
+const source=readFileSync('src/components/auth/AuthLockScreen.tsx','utf8');
+const start=source.indexOf('const migrateUnlockedVault');
+const end=source.indexOf('const handleUnlock',start);
+const block=source.slice(start,end);
+let fail=0;const check=(n,ok)=>{console.log(`${ok?'OK  ':'FAIL'} ${n}`);if(!ok)fail++;};
+check('migration factorisée',start>=0&&end>start);
+check('refus serveur non vide',block.includes('if (!isWorkspaceEmpty(remoteState))'));
+check('refus absence coffre',block.includes('if (!hasExistingLocalWorkspace())'));
+check('refus lecture locale nulle',block.includes('if (!localState)'));
+const save=block.indexOf('await store.storage.save(localState)');
+const clear=block.indexOf('saveAuthConfig(null)');
+check('sauvegarde distante attendue',save>=0);
+check('coffre supprimé seulement après sauvegarde',clear>save);
+check('deux méthodes utilisent la même migration',(source.match(/await migrateUnlockedVault\(\)/g)||[]).length===2);
+console.log(fail?`\n❌ ${fail} échec(s).`:'\n✅ Migration du coffre sans risque de suppression prématurée.');process.exit(fail?1:0);

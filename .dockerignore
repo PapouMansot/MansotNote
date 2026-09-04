@@ -1,0 +1,10 @@
+node_modules
+dist
+.tmp-test
+.git
+.gitignore
+*.log
+.env
+.env.*
+!.env.example
+scripts/*.tmp

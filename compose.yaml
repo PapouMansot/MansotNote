@@ -1,0 +1,101 @@
+services:
+  mansotnote-db:
+    image: pgvector/pgvector:pg16
+    container_name: mansotnote-db
+    restart: unless-stopped
+    networks:
+      - shared_net
+    environment:
+      POSTGRES_DB: mansotnote
+      POSTGRES_USER: mansotnote
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - mansotnote_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mansotnote -d mansotnote"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mansotnote-backup:
+    image: postgres:16-alpine
+    container_name: mansotnote-backup
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - shared_net
+    depends_on:
+      mansotnote-db:
+        condition: service_healthy
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./deploy/backup-postgres.sh:/backup.sh:ro
+      - mansotnote_backups:/backups
+    command: ["sh", "/backup.sh"]
+
+  mansotnote-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: mansotnote-api:latest
+    container_name: mansotnote-api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - shared_net
+      - ollama_net
+    depends_on:
+      mansotnote-db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://mansotnote:${POSTGRES_PASSWORD}@mansotnote-db:5432/mansotnote
+      INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      SESSION_DAYS: 30
+      OLLAMA_URL: http://ollama:11434/v1
+      ALLOWED_AI_MODELS: qwen3.8:9b-q6-32k
+      EMBEDDING_MODEL: qwen3-embedding:0.6b-8k
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 20s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+
+  mansotnote:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_AI_ENDPOINT: "/api/v1/ai"
+        VITE_AI_MODEL: "qwen3.8:9b-q6-32k"
+        VITE_AI_EMBEDDING_MODEL: "qwen3-embedding:0.6b-8k"
+    image: mansotnote:latest
+    container_name: mansotnote
+    restart: unless-stopped
+    networks:
+      - shared_net
+    depends_on:
+      mansotnote-api:
+        condition: service_healthy
+    ports:
+      - "8793:8080"
+
+networks:
+  shared_net:
+    external: true
+    name: shared_network
+  ollama_net:
+    external: true
+    name: ollama_default
+
+volumes:
+  mansotnote_postgres:
+    name: mansotnote_postgres
+  mansotnote_backups:
+    name: mansotnote_backups

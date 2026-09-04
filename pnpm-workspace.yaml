@@ -1,0 +1,5 @@
+# Scripts d'installation autorisés (pnpm 11 les bloque par défaut).
+# esbuild installe son binaire natif via un postinstall : sans cette
+# autorisation, le binaire manque et `vite build` échoue.
+allowBuilds:
+  esbuild: true

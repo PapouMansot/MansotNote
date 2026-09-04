@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+  .dark {
+    color-scheme: dark;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-white font-sans text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100;
+  }
+  /* Barres de défilement discrètes */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.zinc.300') transparent;
+  }
+  .dark * {
+    scrollbar-color: theme('colors.zinc.700') transparent;
+  }
+}
+
+@layer components {
+  /* Champs (input/select/textarea) partagent la même base */
+  .field {
+    @apply rounded-lg border border-zinc-300 bg-white text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-indigo-500;
+  }
+
+  /* Code inline dans le markdown */
+  .prose :not(pre) > code {
+    @apply rounded-md bg-zinc-100 px-1.5 py-0.5 font-mono text-[0.875em] font-medium text-zinc-800 before:content-none after:content-none dark:bg-zinc-800 dark:text-zinc-200;
+  }
+}

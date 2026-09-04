@@ -1,0 +1,346 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+body {
+  width: 430px;
+  background-color: #09090b;
+  color: #f4f4f5;
+  font-size: 13px;
+}
+
+.app-container {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 580px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #27272a;
+  padding-bottom: 8px;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 14px;
+  color: #fafafa;
+}
+
+.status {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: #27272a;
+  border-radius: 12px;
+  color: #a1a1aa;
+}
+
+.tabs {
+  display: flex;
+  gap: 3px;
+  background: #18181b;
+  padding: 3px;
+  border-radius: 8px;
+}
+
+.tab-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #a1a1aa;
+  padding: 6px 4px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.tab-btn:hover {
+  color: #fafafa;
+}
+
+.tab-btn.active {
+  background: #4f46e5;
+  color: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.tab-content {
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tab-content.active {
+  display: flex;
+}
+
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.ai-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.btn-tool {
+  background: #27272a;
+  color: #c7d2fe;
+  border: 1px solid #3730a3;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-tool:hover {
+  background: #3730a3;
+  color: #ffffff;
+}
+
+label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #a1a1aa;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+input, textarea, select {
+  width: 100%;
+  background: #18181b;
+  border: 1px solid #27272a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: #fafafa;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+input:focus, textarea:focus, select:focus {
+  border-color: #6366f1;
+}
+
+.readonly-input {
+  color: #71717a;
+  cursor: not-allowed;
+  font-size: 11px;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.hint {
+  font-size: 10px;
+  color: #71717a;
+}
+
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-sm {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.btn-primary {
+  background: #4f46e5;
+  color: #ffffff;
+}
+
+.btn-primary:hover {
+  background: #4338ca;
+}
+
+.btn-secondary {
+  background: #27272a;
+  color: #f4f4f5;
+}
+
+.btn-secondary:hover {
+  background: #3f3f46;
+}
+
+.action-grid {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 6px;
+}
+
+.field-actions {
+  display: flex;
+  justify-content: stretch;
+}
+
+.field-actions button {
+  width: 100%;
+}
+
+/* Visualiseur Markdown sécurisé (HTML produit uniquement après échappement). */
+.markdown-viewer,
+.sia-msg.assistant .sia-msg-text {
+  overflow-wrap: anywhere;
+}
+
+.markdown-viewer {
+  max-height: 245px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid #3730a3;
+  border-radius: 7px;
+  background: #121214;
+  color: #e4e4e7;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.markdown-viewer[hidden] {
+  display: none;
+}
+
+.markdown-viewer h1, .markdown-viewer h2, .markdown-viewer h3,
+.sia-msg-text h1, .sia-msg-text h2, .sia-msg-text h3 {
+  color: #fafafa;
+  line-height: 1.25;
+  margin: 0.65em 0 0.35em;
+}
+.markdown-viewer h1, .sia-msg-text h1 { font-size: 17px; border-bottom: 1px solid #3f3f46; padding-bottom: 4px; }
+.markdown-viewer h2, .sia-msg-text h2 { font-size: 15px; }
+.markdown-viewer h3, .sia-msg-text h3 { font-size: 13px; }
+.markdown-viewer p, .sia-msg-text p { margin: 0.45em 0; }
+.markdown-viewer ul, .markdown-viewer ol,
+.sia-msg-text ul, .sia-msg-text ol { margin: 0.45em 0; padding-left: 1.5em; }
+.markdown-viewer li, .sia-msg-text li { margin: 0.2em 0; }
+.markdown-viewer blockquote, .sia-msg-text blockquote {
+  margin: 0.55em 0;
+  padding-left: 9px;
+  border-left: 3px solid #6366f1;
+  color: #a1a1aa;
+}
+.markdown-viewer code, .sia-msg-text code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #27272a;
+  color: #c7d2fe;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.markdown-viewer pre, .sia-msg-text pre {
+  overflow-x: auto;
+  margin: 0.55em 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: #09090b;
+}
+.markdown-viewer pre code, .sia-msg-text pre code { padding: 0; background: transparent; }
+.markdown-viewer a, .sia-msg-text a { color: #818cf8; text-decoration: underline; }
+.markdown-viewer hr, .sia-msg-text hr { border: 0; border-top: 1px solid #3f3f46; margin: 0.7em 0; }
+
+/* SIA Chat Styles */
+.sia-chat-box {
+  height: 220px;
+  overflow-y: auto;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  background: #121214;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sia-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.sia-msg.user {
+  align-items: flex-end;
+}
+
+.sia-msg.user .sia-msg-text {
+  background: #4f46e5;
+  color: #fff;
+  border-radius: 10px 10px 2px 10px;
+  padding: 6px 10px;
+  max-width: 85%;
+}
+
+.sia-msg.assistant .sia-msg-text {
+  background: #1e1e24;
+  border: 1px solid #2e2e38;
+  color: #e4e4e7;
+  border-radius: 10px 10px 10px 2px;
+  padding: 6px 10px;
+  max-width: 90%;
+}
+
+.sia-msg-author {
+  font-size: 10px;
+  font-weight: 600;
+  color: #818cf8;
+}
+
+.sia-input-container {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+}
+
+.sia-input-container textarea {
+  flex: 1;
+}
+
+.footer {
+  text-align: center;
+  padding-top: 6px;
+  border-top: 1px solid #27272a;
+}
+
+.footer a {
+  color: #818cf8;
+  text-decoration: none;
+  font-size: 11px;
+}
+
+.footer a:hover {
+  text-decoration: underline;
+}

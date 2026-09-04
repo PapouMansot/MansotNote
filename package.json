@@ -1,0 +1,59 @@
+{
+  "name": "mansotnote",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MansotNote — gestion de notes Markdown et de tâches Kanban, style Notion/Obsidian.",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/build-bookmarklet.mjs && tsc --noEmit && vite build",
+    "build:extension": "node scripts/generate-extension-icons.mjs && node scripts/build-extension.mjs",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "smoke": "esbuild src/lib/export.ts src/lib/ai.ts src/store/app-store.ts src/store/persist.ts src/hooks/useKeyboardShortcuts.ts --bundle --format=esm --platform=node \"--alias:@=./src\" \"--define:import.meta.env={}\" --outdir=node_modules/.cache/smoke && node scripts/smoke-pass1.mjs",
+    "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/index.mjs",
+    "start:server": "node dist-server/index.mjs"
+  },
+  "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "clsx": "^2.1.1",
+    "cookie-parser": "^1.4.7",
+    "dompurify": "^3.2.4",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.6.2",
+    "helmet": "^8.3.0",
+    "lucide-react": "^0.469.0",
+    "marked": "^15.0.6",
+    "nanoid": "^5.0.9",
+    "pg": "^8.23.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "shiki": "^1.22.0",
+    "tailwind-merge": "^2.6.0",
+    "zod": "^4.4.3",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/typography": "^0.5.15",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "esbuild": "^0.21.5",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "tsx": "^4.23.12",
+    "typescript": "~5.6.3",
+    "vite": "^5.4.11"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "packageManager": "pnpm@11.22.0"
+}

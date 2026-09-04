@@ -1,0 +1,17 @@
+import { readFileSync } from 'node:fs';
+const app=readFileSync('src/App.tsx','utf8');
+const modal=readFileSync('src/components/auth/LegacyBrowserImport.tsx','utf8');
+let fail=0;const check=(n,ok)=>{console.log(`${ok?'OK  ':'FAIL'} ${n}`);if(!ok)fail++;};
+check('source ancienne origine exacte',app.includes("window.location.origin === 'http://192.168.1.47:8793'"));
+check('destination HTTPS exacte',app.includes("'https://notes.mansotfamily.fr'"));
+check('pas de wildcard postMessage source',!app.includes("type: 'mansotnote:local-migration', values },\n      '*'"));
+check('trois clés MansotNote seulement',app.includes('[STORAGE_KEYS.state, STORAGE_KEYS.auth, STORAGE_KEYS.vault]'));
+check('origine source vérifiée',modal.includes('event.origin !== LEGACY_ORIGIN'));
+check('fenêtre source vérifiée',modal.includes('event.source !== popupRef.current'));
+check('type de message vérifié',modal.includes("event.data?.type !== 'mansotnote:local-migration'"));
+check('aucun mot de passe transféré',!modal.toLowerCase().includes('password'));
+check('rechargement après copie',modal.includes('window.location.reload()'));
+check('fichier versionné vérifié',modal.includes("parsed.type !== 'mansotnote:local-migration-file'") && modal.includes('parsed.version !== 1'));
+check('fichier filtre aussi les trois clés',modal.includes('const installValues =') && modal.includes('[STORAGE_KEYS.state, STORAGE_KEYS.auth, STORAGE_KEYS.vault] as const'));
+check('source propose téléchargement manuel',app.includes("link.download = 'mansotnote-migration.json'"));
+console.log(fail?`\n❌ ${fail} échec(s).`:'\n✅ Pont de migration cross-origin sécurisé.');process.exit(fail?1:0);
