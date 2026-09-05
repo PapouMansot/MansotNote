@@ -50,6 +50,11 @@ import { AiTransformModal } from '@/components/ai/AiTransformModal';
 import { ConfirmModal } from '@/components/ui/ConfirmModal';
 import { FormattingToolbar } from './FormattingToolbar';
 import { FloatingSelectionMenu } from './FloatingSelectionMenu';
+import {
+  replaceSelectionInMarkdown,
+  updateBlock,
+  type MarkdownBlock,
+} from '@/lib/markdown-block';
 
 const MODES: Array<{ id: EditorMode; icon: typeof Pencil; label: string }> = [
   { id: 'edit', icon: Pencil, label: 'Écriture' },
@@ -432,6 +437,68 @@ export function NoteEditor() {
       .finally(() => setAiBusy(false));
   };
 
+  const handlePreviewAiAction = (
+    action: 'correct' | 'rewrite' | 'style' | 'resume',
+    targetText: string,
+    block?: MarkdownBlock,
+  ) => {
+    const config: AiConfig = {
+      endpoint: state.data.settings.aiEndpoint,
+      apiKey: state.data.settings.aiApiKey,
+      model: state.data.settings.aiModel,
+      keepAlive: state.data.settings.aiKeepAlive,
+    };
+    if (!isAiConfigured(config)) {
+      state.toast('error', 'IA non configurée — vérifie les paramètres IA.');
+      return;
+    }
+    setAiBusy(true);
+    state.toast('info', 'Traitement IA en cours…');
+    const promise =
+      action === 'correct'
+        ? correctText(config, targetText)
+        : transformNote(config, action, targetText);
+
+    promise
+      .then((result) => {
+        if (isTextUnchanged(targetText, result)) {
+          state.toast('success', '✨ Aucune modification requise !');
+          return;
+        }
+        const currentContent = draft.content ?? '';
+        let updatedMd = currentContent;
+        if (block) {
+          updatedMd = updateBlock(currentContent, block, result);
+        } else {
+          updatedMd = replaceSelectionInMarkdown(currentContent, targetText, result);
+        }
+        pushHistory(updatedMd);
+        state.toast('success', 'Action IA appliquée directement sur la note !');
+      })
+      .catch((err: unknown) => {
+        state.toast('error', err instanceof Error ? err.message : 'Échec de l’action IA');
+      })
+      .finally(() => setAiBusy(false));
+  };
+
+  const handleCreateKanbanTask = (text: string) => {
+    const cols = state.data.columns;
+    if (cols.length === 0) {
+      state.toast('error', 'Aucune colonne Kanban disponible.');
+      return;
+    }
+    const targetCol = cols[0];
+    const firstLine = text.split('\n')[0].replace(/^[-*0-9.)\s[\]#]+/, '').trim();
+    const title = firstLine.slice(0, 60) || 'Nouvelle tâche';
+    state.createCard(targetCol.id, {
+      title,
+      description: text,
+      linkedNoteId: note?.id ?? null,
+      priority: 'medium',
+    });
+    state.toast('success', `Tâche « ${title} » ajoutée au Kanban !`);
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const isMac = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
     const modKey = isMac ? e.metaKey : e.ctrlKey;
@@ -697,6 +764,8 @@ export function NoteEditor() {
               // Cocher une case met à jour le Markdown source, en passant par
               // l'historique afin que Ctrl+Z annule aussi cette action.
               onMarkdownChange={pushHistory}
+              onAiAction={handlePreviewAiAction}
+              onCreateKanbanTask={handleCreateKanbanTask}
             />
           </div>
         )}
