@@ -37,6 +37,7 @@ import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer';
 import { IconButton } from '@/components/ui/IconButton';
 import { Button } from '@/components/ui/Button';
 import { AiSettingsFields } from './AiSettingsFields';
+import { cn } from '@/lib/utils';
 
 export interface ActionProposal {
   type:
@@ -411,6 +412,11 @@ export function AiChatDrawer({
       }
     }
 
+    // Exécution automatique immédiate pour la création / modification de note
+    if (action && (action.type === 'create_note' || action.type === 'append_note' || action.type === 'update_note')) {
+      action = executeActionDirectly(action);
+    }
+
     const assistantTurn: AssistantTurn = {
         id: String(Date.now() + 1),
         role: 'assistant',
@@ -430,6 +436,97 @@ export function AiChatDrawer({
     } finally {
       setLoading(false);
     }
+  };
+
+  const executeActionDirectly = (act: ActionProposal): ActionProposal => {
+    const currentNotes = useAppStore.getState().data.notes;
+    const currentDraft = useAppStore.getState().ui.noteDraft;
+
+    if (act.type === 'create_note') {
+      const { title, content } = act.payload;
+      const noteId = state.createNote({
+        title: title || 'Note IA',
+        content: content || '',
+        preserveView: true,
+      });
+      void state.saveDraftNow();
+      state.toast('success', `Note « ${title || 'Note IA'} » créée dans vos notes !`);
+      return {
+        ...act,
+        payload: { ...act.payload, noteId },
+        executed: true,
+      };
+    } else if (act.type === 'append_note') {
+      const { noteId, content, title } = act.payload;
+      const targetTitle = String(title || '').toLowerCase().trim();
+      const targetNote = currentNotes.find(
+        (n) =>
+          (noteId && n.id === noteId) ||
+          (targetTitle && n.title.toLowerCase().trim() === targetTitle) ||
+          (targetTitle && n.title.toLowerCase().includes(targetTitle)),
+      ) || (state.ui.activeNoteId ? currentNotes.find((n) => n.id === state.ui.activeNoteId) : undefined)
+        || (currentDraft?.noteId ? currentNotes.find((n) => n.id === currentDraft.noteId) : undefined);
+
+      if (targetNote) {
+        const pad = targetNote.content.endsWith('\n\n') ? '' : targetNote.content.endsWith('\n') ? '\n' : '\n\n';
+        const newContent = targetNote.content + pad + String(content || '').trim();
+        state.updateNote(targetNote.id, { content: newContent });
+        if (currentDraft?.noteId === targetNote.id) {
+          state.setDraft({ content: newContent });
+        }
+        void state.saveDraftNow();
+        state.toast('success', `Ajouté à la note « ${targetNote.title} » !`);
+        return {
+          ...act,
+          payload: { ...act.payload, noteId: targetNote.id, title: targetNote.title },
+          executed: true,
+        };
+      } else {
+        const newId = state.createNote({
+          title: title || 'Nouvelle note',
+          content: String(content || '').trim(),
+          preserveView: true,
+        });
+        void state.saveDraftNow();
+        state.toast('success', `Note « ${title || 'Nouvelle note'} » créée avec le contenu !`);
+        return {
+          ...act,
+          payload: { ...act.payload, noteId: newId },
+          executed: true,
+        };
+      }
+    } else if (act.type === 'update_note') {
+      const { noteId, content, title } = act.payload;
+      const targetTitle = String(title || '').toLowerCase().trim();
+      const targetNote = currentNotes.find(
+        (n) =>
+          (noteId && n.id === noteId) ||
+          (targetTitle && n.title.toLowerCase().trim() === targetTitle) ||
+          (targetTitle && n.title.toLowerCase().includes(targetTitle)),
+      ) || (state.ui.activeNoteId ? currentNotes.find((n) => n.id === state.ui.activeNoteId) : undefined)
+        || (currentDraft?.noteId ? currentNotes.find((n) => n.id === currentDraft.noteId) : undefined);
+
+      if (targetNote) {
+        state.updateNote(targetNote.id, {
+          ...(content !== undefined ? { content } : {}),
+          ...(title !== undefined ? { title } : {}),
+        });
+        if (currentDraft?.noteId === targetNote.id) {
+          state.setDraft({
+            ...(content !== undefined ? { content } : {}),
+            ...(title !== undefined ? { title } : {}),
+          });
+        }
+        void state.saveDraftNow();
+        state.toast('success', `Note « ${targetNote.title} » mise à jour avec succès !`);
+        return {
+          ...act,
+          payload: { ...act.payload, noteId: targetNote.id, title: targetNote.title },
+          executed: true,
+        };
+      }
+    }
+    return act;
   };
 
   const executeAction = (turnId: string, action: ActionProposal) => {
@@ -669,10 +766,20 @@ export function AiChatDrawer({
 
             {/* Carte d'action 1-clic */}
             {turn.action && (
-              <div className="mt-2 w-[95%] rounded-lg border border-indigo-200 bg-indigo-50/60 p-2.5 dark:border-indigo-900/60 dark:bg-indigo-950/40">
-                <div className="mb-2 flex items-center justify-between text-xs font-semibold text-indigo-900 dark:text-indigo-200">
+              <div className={cn(
+                'mt-2 w-[95%] rounded-lg border p-2.5 transition-all',
+                turn.action.executed
+                  ? 'border-emerald-500/40 bg-emerald-50/70 dark:border-emerald-500/30 dark:bg-emerald-950/40'
+                  : 'border-indigo-200 bg-indigo-50/60 dark:border-indigo-900/60 dark:bg-indigo-950/40',
+              )}>
+                <div className={cn(
+                  'mb-2 flex items-center justify-between text-xs font-semibold',
+                  turn.action.executed ? 'text-emerald-950 dark:text-emerald-200' : 'text-indigo-900 dark:text-indigo-200',
+                )}>
                   <span className="inline-flex items-center gap-1.5">
-                    {turn.action.type === 'create_note' ? (
+                    {turn.action.executed ? (
+                      <Check size={14} className="text-emerald-600 dark:text-emerald-400" />
+                    ) : turn.action.type === 'create_note' ? (
                       <StickyNote size={14} className="text-indigo-600" />
                     ) : turn.action.type === 'append_note' ? (
                       <StickyNote size={14} className="text-emerald-600" />
@@ -685,11 +792,17 @@ export function AiChatDrawer({
                       <SquareKanban size={14} className="text-indigo-600" />
                     )}
                     {turn.action.type === 'create_note'
-                      ? `Créer la note : « ${turn.action.payload.title || 'Sans titre'} »`
+                      ? turn.action.executed
+                        ? `Note enregistrée : « ${turn.action.payload.title || 'Note'} »`
+                        : `Créer la note : « ${turn.action.payload.title || 'Sans titre'} »`
                       : turn.action.type === 'append_note'
-                        ? `Ajouter à la note : « ${turn.action.payload.title || 'Note'} »`
+                        ? turn.action.executed
+                          ? `Ajouté à la note : « ${turn.action.payload.title || 'Note'} »`
+                          : `Ajouter à la note : « ${turn.action.payload.title || 'Note'} »`
                       : turn.action.type === 'update_note'
-                        ? `Mettre à jour la note : « ${turn.action.payload.title || 'Note active'} »`
+                        ? turn.action.executed
+                          ? `Note mise à jour : « ${turn.action.payload.title || 'Note'} »`
+                          : `Mettre à jour la note : « ${turn.action.payload.title || 'Note active'} »`
                         : turn.action.type === 'delete_note'
                           ? `Supprimer la note : « ${turn.action.payload.title || 'Sans titre'} »`
                           : turn.action.type === 'delete_all_cards'
@@ -698,32 +811,47 @@ export function AiChatDrawer({
                   </span>
                 </div>
 
-                <Button
-                  size="sm"
-                  variant={
-                    turn.action.type === 'delete_note' ||
-                    turn.action.type === 'delete_all_cards'
-                      ? 'danger'
-                      : 'primary'
-                  }
-                  className="w-full text-xs"
-                  disabled={turn.action.executed}
-                  icon={
-                    turn.action.executed ? (
-                      <Check size={13} />
-                    ) : (
-                      <ArrowRight size={13} />
-                    )
-                  }
-                  onClick={() => executeAction(turn.id, turn.action!)}
-                >
-                  {turn.action.executed
-                    ? 'Action appliquée dans MansotNote !'
-                    : turn.action.type === 'delete_note' ||
-                        turn.action.type === 'delete_all_cards'
-                      ? 'Confirmer la suppression'
-                      : 'Appliquer dans mon espace'}
-                </Button>
+                {turn.action.executed ? (
+                  (turn.action.type === 'create_note' ||
+                    turn.action.type === 'append_note' ||
+                    turn.action.type === 'update_note') &&
+                  turn.action.payload?.noteId ? (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="w-full text-xs font-semibold text-emerald-800 border-emerald-300 hover:bg-emerald-100 dark:border-emerald-800 dark:text-emerald-200 dark:hover:bg-emerald-950/60"
+                      icon={<ArrowRight size={13} />}
+                      onClick={() => {
+                        state.openNote(turn.action!.payload.noteId);
+                        state.setView('notes');
+                        onClose();
+                      }}
+                    >
+                      Ouvrir la note dans l’éditeur
+                    </Button>
+                  ) : (
+                    <Button size="sm" variant="ghost" className="w-full text-xs" disabled icon={<Check size={13} />}>
+                      Action enregistrée
+                    </Button>
+                  )
+                ) : (
+                  <Button
+                    size="sm"
+                    variant={
+                      turn.action.type === 'delete_note' ||
+                      turn.action.type === 'delete_all_cards'
+                        ? 'danger'
+                        : 'primary'
+                    }
+                    className="w-full text-xs"
+                    icon={<ArrowRight size={13} />}
+                    onClick={() => executeAction(turn.id, turn.action!)}
+                  >
+                    {turn.action.type === 'delete_all_cards'
+                      ? 'Confirmer la suppression complète'
+                      : 'Appliquer cette action'}
+                  </Button>
+                )}
               </div>
             )}
           </div>

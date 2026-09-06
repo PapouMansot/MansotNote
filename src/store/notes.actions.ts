@@ -25,6 +25,7 @@ export interface CreateNoteInput {
   content?: string;
   folderId?: ID | null;
   tagIds?: ID[];
+  preserveView?: boolean;
 }
 
 export interface NotesActions {
@@ -100,16 +101,23 @@ export function createNotesActions(set: StoreSet, get: StoreGet) {
         data: { ...data, notes: [note, ...data.notes] },
         ui: {
           ...ui,
-          view: 'notes',
+          view: input?.preserveView ? ui.view : 'notes',
           activeNoteId: id,
+          notesFilter: {
+            ...ui.notesFilter,
+            folderId: 'all',
+            tagId: 'all',
+            search: '',
+            archivedOnly: false,
+          },
           noteDraft: {
             noteId: id,
             title: note.title,
             content: note.content,
-            dirty: true,
+            dirty: false,
             savedAt: now,
           },
-          saveStatus: 'dirty',
+          saveStatus: 'saved',
         },
       });
       schedulePersist(set, get);

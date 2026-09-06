@@ -496,13 +496,16 @@ export function Sidebar({ onOpenChat: _onOpenChat }: SidebarProps = {}) {
       </div>
 
       <nav className="space-y-0.5 px-3">
-        <NavItem
-          icon={<StickyNote size={16} />}
-          label="Notes"
-          hint="Ctrl+1"
-          active={view === 'notes'}
-          onClick={() => setView('notes')}
-        />
+      <NavItem
+        icon={<StickyNote size={16} />}
+        label="Notes"
+        hint="Ctrl+1"
+        active={view === 'notes'}
+        onClick={() => {
+          setView('notes');
+          setNotesFilter({ folderId: 'all', tagId: 'all', search: '', archivedOnly: false });
+        }}
+      />
         <NavItem
           icon={<SquareKanban size={16} />}
           label="Kanban"
