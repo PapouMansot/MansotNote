@@ -79,14 +79,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
               ? loaded.settings.initialView
               : DEFAULT_UI_STATE.view;
 
+          // Nettoyage historique des notes de démonstration du tout premier
+          // seed. Le filtrage porte UNIQUEMENT sur les identifiants du seed :
+          // filtrer sur le titre supprimait silencieusement de vraies notes
+          // de l'utilisateur (tout titre contenant « mansot », « pâtes »…).
+          const SEED_DEMO_NOTE_IDS = new Set(['note-welcome', 'note-carbonara']);
           const cleanedNotes = (loaded.notes ?? []).filter(
-            (n) =>
-              n.id !== 'note-welcome' &&
-              n.id !== 'note-carbonara' &&
-              !n.title.toLowerCase().includes('mansot') &&
-              !n.title.toLowerCase().includes('carbonara') &&
-              !n.title.toLowerCase().includes('pâtes') &&
-              !n.title.toLowerCase().includes('pates'),
+            (n) => !SEED_DEMO_NOTE_IDS.has(n.id),
           );
 
           set({

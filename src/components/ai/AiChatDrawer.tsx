@@ -542,17 +542,23 @@ export function AiChatDrawer({
       );
     } else if (action.type === 'delete_note') {
       const targetTitle = String(action.payload?.title || '').toLowerCase().trim();
+      // Suppression = action destructive : identifiant ou titre EXACT
+      // uniquement, jamais de correspondance approximative.
       const targetNote = notes.find(
         (n) =>
-          n.id === action.payload?.id ||
-          n.title.toLowerCase().trim() === targetTitle ||
-          n.title.toLowerCase().includes(targetTitle),
+          (action.payload?.id && n.id === action.payload.id) ||
+          (targetTitle !== '' && n.title.toLowerCase().trim() === targetTitle),
       );
-      if (targetNote) {
+      const ambiguous =
+        targetTitle !== '' &&
+        notes.filter((n) => n.title.toLowerCase().trim() === targetTitle).length > 1;
+      if (ambiguous) {
+        state.toast('error', 'Plusieurs notes portent ce titre : supprime-la manuellement.');
+      } else if (targetNote) {
         state.deleteNote(targetNote.id);
         state.toast('info', `Note « ${targetNote.title} » supprimée !`);
       } else {
-        state.toast('error', `Note introuvable.`);
+        state.toast('error', 'Note introuvable : aucune suppression effectuée.');
       }
     } else if (action.type === 'update_note') {
       const { noteId, content, title } = action.payload;

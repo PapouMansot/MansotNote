@@ -276,6 +276,45 @@ await test('createNote : le brouillon précédent est commité', async () => {
   st.closeNote();
 });
 
+await test('bootstrap : aucune note utilisateur supprimée au chargement', async () => {
+  // Régression : un filtre de nettoyage du seed portait sur le TITRE et
+  // supprimait silencieusement toute note contenant « mansot », « pâtes »…
+  const userNotes = [
+    { id: 'note_user_1', title: 'Réunion Mansot famille', content: 'a', folderId: null, tagIds: [], pinned: false, createdAt: 1, updatedAt: 1 },
+    { id: 'note_user_2', title: 'Recette de pâtes du dimanche', content: 'b', folderId: null, tagIds: [], pinned: false, createdAt: 1, updatedAt: 1 },
+    { id: 'note_user_3', title: 'Carbonara maison', content: 'c', folderId: null, tagIds: [], pinned: false, createdAt: 1, updatedAt: 1 },
+    { id: 'note-welcome', title: 'Bienvenue (seed démo)', content: 'd', folderId: null, tagIds: [], pinned: false, createdAt: 1, updatedAt: 1 },
+  ];
+  useAppStore.setState({
+    hydrated: false,
+    storage: {
+      id: 'remote',
+      isAvailable: () => true,
+      load: async () => ({
+        schemaVersion: 1,
+        savedAt: Date.now(),
+        seed: null,
+        notes: userNotes,
+        folders: [],
+        tags: [],
+        columns: [],
+        cards: [],
+        labels: [],
+        settings: {},
+      }),
+      save: async () => {},
+      clear: async () => {},
+    },
+  });
+  await useAppStore.getState().bootstrap(true);
+  const ids = useAppStore.getState().data.notes.map((n) => n.id);
+  assert.ok(ids.includes('note_user_1'), 'une note « Mansot » doit être conservée');
+  assert.ok(ids.includes('note_user_2'), 'une note « pâtes » doit être conservée');
+  assert.ok(ids.includes('note_user_3'), 'une note « Carbonara » doit être conservée');
+  assert.ok(!ids.includes('note-welcome'), 'la note de démo du seed reste retirée');
+  useAppStore.setState({ storage: fakeStorage });
+});
+
 /* ------------------------------------------------------------------ */
 /* 3. hooks — matchesShortcut (logique pure)                           */
 /* ------------------------------------------------------------------ */
