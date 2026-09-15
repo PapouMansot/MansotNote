@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { pool, assertDatabase } from './db.js';
 import { migrate } from './migrate.js';
 import { hybridSearch, indexWorkspace } from './rag.js';
+import { assembleWorkspaceFromDb, syncWorkspaceToRelational } from './relational-sync.js';
 import {
   createSessionToken,
   hashPassword,
@@ -221,6 +222,10 @@ app.post('/auth/change-password', authenticate, loginLimiter, async (req: AuthRe
 });
 
 app.get('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  const relationalResult = await assembleWorkspaceFromDb(pool, req.user!.id);
+  if (relationalResult) {
+    return res.json(relationalResult);
+  }
   const result = await pool.query('SELECT state,version,updated_at FROM workspaces WHERE user_id=$1', [req.user!.id]);
   if (!result.rowCount) return res.json({ state: null, version: 0 });
   res.json({ state: result.rows[0].state, version: Number(result.rows[0].version), updatedAt: result.rows[0].updated_at });
@@ -240,6 +245,10 @@ app.put('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) =
       return res.status(409).json({ error: 'Conflit de synchronisation', version });
     }
     const nextVersion = version + 1;
+
+    // Synchronise dans les tables relationnelles Supabase (notes, folders, tags, kanban)
+    await syncWorkspaceToRelational(client, req.user!.id, state);
+
     await client.query(
       `INSERT INTO workspaces(user_id,state,version,updated_at) VALUES($1,$2,$3,now())
        ON CONFLICT(user_id) DO UPDATE SET state=EXCLUDED.state,version=EXCLUDED.version,updated_at=now()`,
@@ -254,6 +263,79 @@ app.put('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) =
     res.json({ version: nextVersion });
   } catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
+});
+
+// ==========================================
+// API REST individuelle pour les Notes (Supabase)
+// ==========================================
+app.get(['/api/v1/notes', '/v1/notes'], authenticate, async (req: AuthRequest, res) => {
+  const notes = await pool.query(
+    'SELECT id, folder_id as "folderId", title, content, tag_ids as "tagIds", pinned, archived, archived_at as "archivedAt", created_at as "createdAt", updated_at as "updatedAt" FROM notes WHERE user_id=$1 ORDER BY updated_at DESC',
+    [req.user!.id]
+  );
+  res.json(notes.rows);
+});
+
+app.get(['/api/v1/notes/:id', '/v1/notes/:id'], authenticate, async (req: AuthRequest, res) => {
+  const note = await pool.query(
+    'SELECT id, folder_id as "folderId", title, content, tag_ids as "tagIds", pinned, archived, archived_at as "archivedAt", created_at as "createdAt", updated_at as "updatedAt" FROM notes WHERE user_id=$1 AND id=$2',
+    [req.user!.id, req.params.id]
+  );
+  if (!note.rowCount) return res.status(404).json({ error: 'Note introuvable' });
+  res.json(note.rows[0]);
+});
+
+// ==========================================
+// Upload de médias / images (Supabase Storage)
+// ==========================================
+const mediaUploadSchema = z.object({
+  filename: z.string().trim().min(1).max(255),
+  contentType: z.string().trim().refine(
+    (t) => ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml'].includes(t),
+    { message: 'Type de fichier non supporté (png, jpeg, gif, webp, svg uniquement)' }
+  ),
+  dataBase64: z.string().min(1).max(15 * 1024 * 1024),
+});
+
+app.post(['/api/v1/media/upload', '/v1/media/upload'], authenticate, async (req: AuthRequest, res) => {
+  const parsed = mediaUploadSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Données d'image invalides", details: parsed.error.issues });
+  }
+
+  const { filename, contentType, dataBase64 } = parsed.data;
+  const buffer = Buffer.from(dataBase64.replace(/^data:image\/[a-z+]+;base64,/, ''), 'base64');
+
+  const ext = filename.split('.').pop() || 'png';
+  const objectPath = `${req.user!.id}/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
+
+  const supaStorageHost = process.env.SUPABASE_STORAGE_URL || 'http://supabase-storage:5000';
+  const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  try {
+    const uploadRes = await fetch(`${supaStorageHost}/object/mansotnote-media/${objectPath}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': contentType,
+        'Authorization': `Bearer ${supaKey}`,
+        'apikey': supaKey || '',
+        'x-upsert': 'true',
+      },
+      body: buffer,
+    });
+
+    if (!uploadRes.ok) {
+      const errText = await uploadRes.text();
+      console.error('[media] Erreur upload Supabase Storage:', errText);
+      return res.status(502).json({ error: 'Échec de stockage Supabase', details: errText });
+    }
+
+    const publicUrl = `/storage/v1/object/public/mansotnote-media/${objectPath}`;
+    res.json({ url: publicUrl, path: objectPath, filename });
+  } catch (err: any) {
+    console.error('[media] Erreur upload:', err);
+    res.status(500).json({ error: err.message || 'Erreur interne upload' });
+  }
 });
 
 // ==========================================

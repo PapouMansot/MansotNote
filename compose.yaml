@@ -25,11 +25,11 @@ services:
       - no-new-privileges:true
     networks:
       - shared_net
-    depends_on:
-      mansotnote-db:
-        condition: service_healthy
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: supabase-db
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      SUPABASE_POSTGRES_PASSWORD: ${SUPABASE_POSTGRES_PASSWORD:-${POSTGRES_PASSWORD}}
     volumes:
       - ./deploy/backup-postgres.sh:/backup.sh:ro
       - mansotnote_backups:/backups
@@ -47,13 +47,12 @@ services:
     networks:
       - shared_net
       - ollama_net
-    depends_on:
-      mansotnote-db:
-        condition: service_healthy
     environment:
       NODE_ENV: production
       PORT: 3000
-      DATABASE_URL: postgresql://mansotnote:${POSTGRES_PASSWORD}@mansotnote-db:5432/mansotnote
+      DATABASE_URL: postgresql://postgres:${SUPABASE_POSTGRES_PASSWORD:-${POSTGRES_PASSWORD}}@supabase-db:5432/postgres
+      SUPABASE_STORAGE_URL: http://supabase-storage:5000
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
       INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
       SESSION_DAYS: 30

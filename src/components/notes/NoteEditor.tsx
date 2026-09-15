@@ -184,6 +184,91 @@ export function NoteEditor() {
   const canUndo = historyIndex > 0;
   const canRedo = historyIndex < history.length - 1;
 
+  /* ------------------------------- Téléversement d'images (Supabase) ------ */
+  const handleUploadAndInsertImage = async (file: File) => {
+    if (!file.type.startsWith('image/')) return;
+    const placeholder = `![Téléversement de ${file.name}...]()`;
+    const textarea = textareaRef.current;
+    const start = textarea?.selectionStart ?? (draft?.content?.length ?? 0);
+    const end = textarea?.selectionEnd ?? start;
+    const currentContent = draft?.content ?? '';
+    const withPlaceholder = currentContent.slice(0, start) + placeholder + currentContent.slice(end);
+    pushHistory(withPlaceholder);
+
+    try {
+      const reader = new FileReader();
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const res = await fetch('/api/v1/media/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: file.name || 'image.png',
+          contentType: file.type || 'image/png',
+          dataBase64: base64Data,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Échec de l'upload de l'image");
+      }
+
+      const json = await res.json();
+      const imageUrl = json.url;
+      const markdownImage = `![${file.name || 'image'}](${imageUrl})`;
+
+      // Remplace le placeholder par l'image finale
+      const latestContent = useAppStore.getState().ui.noteDraft?.content ?? withPlaceholder;
+      const finalContent = latestContent.replace(placeholder, markdownImage);
+      pushHistory(finalContent);
+      state.toast('success', 'Image téléversée dans Supabase');
+    } catch (err: any) {
+      console.error(err);
+      state.toast('error', err.message || "Erreur lors de l'upload de l'image");
+      const latestContent = useAppStore.getState().ui.noteDraft?.content ?? withPlaceholder;
+      const revertedContent = latestContent.replace(placeholder, '');
+      pushHistory(revertedContent);
+    }
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) {
+          handleUploadAndInsertImage(file);
+          return;
+        }
+      }
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLTextAreaElement>) => {
+    const files = e.dataTransfer?.files;
+    if (files && files.length > 0) {
+      const file = files[0];
+      if (file.type.startsWith('image/')) {
+        e.preventDefault();
+        handleUploadAndInsertImage(file);
+      }
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLTextAreaElement>) => {
+    if (e.dataTransfer?.types?.includes('Files')) {
+      e.preventDefault();
+    }
+  };
+
   /* ------------------------------- Formatage ----------------------------- */
   const formatInline = (prefix: string, suffix: string, placeholder: string) => {
     const el = textareaRef.current;
@@ -729,6 +814,9 @@ export function NoteEditor() {
               onMouseUp={(e) => checkSelection(e.clientX, e.clientY)}
               onKeyUp={() => checkSelection()}
               onScroll={() => setFloatingPos(null)}
+              onPaste={handlePaste}
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
             />
 
             {/* Menu bulle flottant sur sélection */}
