@@ -209,6 +209,21 @@ export function unwrapFences(text: string): string {
   return match !== null ? match[1].trim() : trimmed;
 }
 
+const ACTION_BLOCK_RE = /```action:[a-z_]+\s*[\s\S]*?```/g;
+
+/**
+ * Nettoie un message d'historique avant de le renvoyer au modèle :
+ *  - les blocs ```action:…``` sont retirés — leur JSON (contenu complet de
+ *    notes) a servi à l'action 1-clic et ne sert à rien dans le contexte ;
+ *  - la longueur est bornée pour ne pas gonfler le préfill des petits
+ *    modèles locaux (un 9B perd 1-3 s par 1000 tokens de préfill inutile).
+ */
+export function sanitizeHistoryContent(content: string, maxChars = 2000): string {
+  let out = content.replace(ACTION_BLOCK_RE, '').trim();
+  if (out.length > maxChars) out = `${out.slice(0, maxChars)}…`;
+  return out;
+}
+
 /**
  * Retire le raisonnement interne des modèles « thinking » (Qwen, DeepSeek-R1,
  * QwQ…), qui exposent leur délibération dans la réponse au lieu d'un champ
@@ -398,6 +413,162 @@ function isAbortError(error: unknown): boolean {
     error instanceof DOMException &&
     error.name === 'AbortError'
   );
+}
+
+/** Résultat d'un streaming : texte final nettoyé + drapeau de coupure. */
+export interface ChatStreamResult {
+  text: string;
+  /** true si le flux s'est interrompu après réception d'un contenu partiel. */
+  truncated: boolean;
+}
+
+/**
+ * Version streaming de `chatComplete` (SSE `data: {choices:[{delta}]}` +
+ * `[DONE]`, comme `/chat/completions` OpenAI et le relais serveur).
+ *
+ * `onText` reçoit le texte accumulé à chaque delta pour affichage incrémental.
+ * Le texte final renvoyé est nettoyé (stripReasoning + unwrapFences), identique
+ * à ce que produit `chatComplete` en mode complet. Si le flux casse alors
+ * qu'une partie du texte est déjà arrivée, on la renvoie avec `truncated`
+ * plutôt que de jeter tout le travail du modèle.
+ */
+export async function chatStream(
+  config: AiConfig,
+  messages: ChatMessage[],
+  options: ChatOptions & { onText?: (text: string) => void } = {},
+): Promise<ChatStreamResult> {
+  if (!isAiConfigured(config)) {
+    throw new Error('IA non configurée (endpoint et modèle requis)');
+  }
+  const normalizedEndpoint = normalizeEndpoint(config.endpoint);
+  const url = /\/api\/v\d+\/ai$/.test(normalizedEndpoint)
+    ? `${normalizedEndpoint}/chat`
+    : `${normalizedEndpoint}/chat/completions`;
+  const key = asText(config.apiKey).trim();
+  const parsedKeepAlive = /^-?\d+$/.test(String(config.keepAlive ?? '-1')) ? Number(config.keepAlive) : (config.keepAlive ?? '-1');
+  const body = JSON.stringify({
+    model: asText(config.model).trim(),
+    messages,
+    stream: true,
+    temperature: options.temperature ?? 0.7,
+    ...(options.think !== undefined ? { think: options.think } : {}),
+    ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
+    ...(parsedKeepAlive !== undefined ? { keep_alive: parsedKeepAlive } : {}),
+  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? 180000);
+  if (options.signal) {
+    options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+  let response: Response;
+  let collected = '';
+  try {
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(key !== '' ? { Authorization: `Bearer ${key}` } : {}),
+        },
+        body,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof TypeError) {
+        // Même repli « requête simple » que chatComplete (LM Studio & co).
+        response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+          body,
+          signal: controller.signal,
+        });
+      } else {
+        throw error;
+      }
+    }
+    if (!response.ok) {
+      const raw = await response.text().catch(() => '');
+      let detail = '';
+      try {
+        const errJson = JSON.parse(raw);
+        detail = errJson.error?.message || errJson.message || errJson.detail || '';
+      } catch {
+        detail = raw.slice(0, 200).trim();
+      }
+      throw new Error(`Erreur IA (${response.status} ${response.statusText})${detail !== '' ? ` : ${detail}` : ''}`);
+    }
+
+    // Fournisseur qui ignore stream:true : réponse complète en JSON.
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const payload = (await response.json().catch(() => null)) as {
+        choices?: Array<{ message?: { content?: string }; text?: string }>;
+        error?: { message?: string };
+      } | null;
+      if (payload?.error?.message) throw new Error(`Erreur serveur IA : ${payload.error.message}`);
+      const content = payload?.choices?.[0]?.message?.content ?? payload?.choices?.[0]?.text ?? '';
+      options.onText?.(content);
+      const cleaned = unwrapFences(stripReasoning(content));
+      if (cleaned === '') throw new Error('L\'IA a renvoyé une réponse vide ou inattendue');
+      return { text: cleaned, truncated: false };
+    }
+
+    if (!response.body) throw new Error('Flux de réponse indisponible (corps vide)');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let text = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line === '' || !line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') continue;
+        let payload: {
+          error?: { message?: string };
+          choices?: Array<{ delta?: { content?: string } }>;
+        };
+        try { payload = JSON.parse(data); } catch { continue; }
+        if (payload.error?.message) throw new Error(`Erreur serveur IA : ${payload.error.message}`);
+        const delta = payload.choices?.[0]?.delta?.content;
+        if (typeof delta === 'string' && delta !== '') {
+          text += delta;
+          collected = text;
+          options.onText?.(text);
+        }
+      }
+    }
+    const cleaned = unwrapFences(stripReasoning(text));
+    if (cleaned === '' && text.trim() === '') {
+      throw new Error('L\'IA a renvoyé une réponse vide ou inattendue');
+    }
+    return { text: cleaned === '' ? text.trim() : cleaned, truncated: false };
+  } catch (error) {
+    // Flux coupé après réception d'une partie du texte : on conserve le
+    // contenu déjà arrivé plutôt que de jeter tout le travail du modèle.
+    if (collected.trim() !== '') {
+      const cleaned = unwrapFences(stripReasoning(collected));
+      if (cleaned.trim() !== '') return { text: cleaned, truncated: true };
+    }
+    if (isAbortError(error)) {
+      throw new Error(
+        "L'IA a mis trop de temps à répondre (> 3 min). Vérifie que ton serveur IA (Ollama / LM Studio / OpenAI) est actif et que le modèle sélectionné est bien chargé.",
+      );
+    }
+    if (error instanceof TypeError) {
+      throw new Error(
+        "Connexion impossible au serveur IA (CORS ou réseau). Vérifie qu'il tourne et que l'URL est exacte (ex. http://localhost:1234/v1 pour LM Studio ou http://localhost:11434/v1 pour Ollama).",
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 /* ------------------------------------------------------------------ */

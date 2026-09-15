@@ -113,9 +113,40 @@ const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'qwen3-embedding:0.6b-8k'
 const OLLAMA_HOST = (process.env.OLLAMA_URL || 'http://ollama:11434/v1')
   .replace(/\/v1\/?$/, '')
   .replace(/\/+$/, '');
+// Contexte maximum du modèle. Sans `num_ctx`, Ollama applique son défaut
+// (4096 tokens) et tronque silencieusement les prompts du copilote, qui
+// dépassent vite 4k tokens (note active + RAG + historique).
+const OLLAMA_NUM_CTX = Math.max(2048, Number(process.env.OLLAMA_NUM_CTX || 16384));
 
 function isAllowedAiModel(model: string): boolean {
   return ALLOWED_AI_MODELS.has(model);
+}
+
+// File d'indexation RAG : une seule indexation active par utilisateur.
+// Sans sérialisation, chaque autosave (1,5 s) lance une indexation qui retient
+// un client du pool PostgreSQL sur le pg_advisory_lock pendant toute la durée
+// des appels Ollama : les indexations s'empilent, le pool (10 clients) s'épuise
+// et les autosaves suivants échouent en 500.
+const indexQueues = new Map<string, Promise<void>>();
+
+function enqueueWorkspaceIndex(userId: string, state: unknown, version: number): void {
+  const previous = indexQueues.get(userId) ?? Promise.resolve();
+  const run = previous
+    .catch(() => undefined)
+    .then(async () => {
+      const client = await pool.connect();
+      try {
+        await indexWorkspace(client, userId, state, version);
+      } catch (error) {
+        console.error('[rag] indexation différée:', error instanceof Error ? error.message : error);
+      } finally {
+        client.release();
+      }
+    });
+  indexQueues.set(userId, run);
+  void run.catch(() => undefined).finally(() => {
+    if (indexQueues.get(userId) === run) indexQueues.delete(userId);
+  });
 }
 
 app.get('/health', async (_req, res) => {
@@ -216,13 +247,10 @@ app.put('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) =
     );
     await client.query('COMMIT');
     // L'index est dérivé du workspace : la réponse d'autosave ne doit pas
-    // attendre Ollama. L'indexation continue en arrière-plan et une panne ne
-    // remet jamais en cause la sauvegarde PostgreSQL déjà commitée.
-    void pool.connect().then(async (indexClient) => {
-      try { await indexWorkspace(indexClient, req.user!.id, state, nextVersion); }
-      catch (error) { console.error('[rag] indexation différée:', error instanceof Error ? error.message : error); }
-      finally { indexClient.release(); }
-    }).catch((error) => console.error('[rag] pool indisponible:', error));
+    // attendre Ollama. L'indexation continue en arrière-plan (sérielle par
+    // utilisateur, voir enqueueWorkspaceIndex) et une panne ne remet jamais
+    // en cause la sauvegarde PostgreSQL déjà commitée.
+    enqueueWorkspaceIndex(req.user!.id, state, nextVersion);
     res.json({ version: nextVersion });
   } catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
@@ -241,10 +269,82 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
     temperature: z.number().min(0).max(2).optional().default(0.15),
     max_tokens: z.number().int().min(1).max(4096).optional(),
     think: z.boolean().optional().default(false),
+    stream: z.boolean().optional().default(false),
   }).safeParse(req.body);
 
   if (!parsed.success) return res.status(400).json({ error: 'Requête IA invalide' });
   if (!isAllowedAiModel(parsed.data.model)) return res.status(403).json({ error: 'Modèle IA non autorisé' });
+
+  // Streaming : on relaie la NDJSON d'Ollama en SSE compatible OpenAI
+  // (data: {choices:[{delta:{content}}]}… puis data: [DONE]). Sans ça le
+  // client attendrait toute la génération avant le premier byte.
+  if (parsed.data.stream) {
+    try {
+      const aiRes = await fetch(`${OLLAMA_HOST}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: parsed.data.model,
+          messages: parsed.data.messages,
+          stream: true,
+          think: parsed.data.think,
+          keep_alive: -1,
+          options: {
+            temperature: parsed.data.temperature,
+            num_ctx: OLLAMA_NUM_CTX,
+            ...(parsed.data.max_tokens ? { num_predict: parsed.data.max_tokens } : {}),
+          },
+        }),
+        signal: AbortSignal.timeout(600_000),
+      });
+
+      if (!aiRes.ok || !aiRes.body) {
+        const err = await aiRes.json().catch(() => ({}));
+        return res.status(aiRes.status || 502).json({ error: err.error || 'Erreur du serveur IA' });
+      }
+
+      res.status(200);
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders?.();
+
+      const reader = aiRes.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      const chunkId = `chatcmpl-${Date.now()}`;
+      const sendChunk = (delta: Record<string, unknown>) => {
+        res.write(`data: ${JSON.stringify({ id: chunkId, object: 'chat.completion.chunk', choices: [{ index: 0, delta }] })}\n\n`);
+      };
+      sendChunk({ role: 'assistant' });
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let newline: number;
+        while ((newline = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          if (line === '') continue;
+          const event = JSON.parse(line) as { message?: { role?: string; content?: string }; done?: boolean; error?: string };
+          if (event.error) {
+            res.write(`data: ${JSON.stringify({ error: event.error })}\n\n`);
+            continue;
+          }
+          if (event.message?.content) sendChunk({ content: event.message.content });
+          if (event.done) { sendChunk({}); res.write('data: [DONE]\n\n'); }
+        }
+      }
+      res.end();
+    } catch (error) {
+      console.error('[ai-proxy-stream] erreur:', error);
+      // En-têtes déjà envoyés : on clôture proprement le flux SSE.
+      res.write(`data: ${JSON.stringify({ error: 'Flux IA interrompu' })}\n\n`);
+      res.end();
+    }
+    return;
+  }
 
   try {
     const aiRes = await fetch(`${OLLAMA_HOST}/api/chat`, {
@@ -258,6 +358,7 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
         keep_alive: -1,
         options: {
           temperature: parsed.data.temperature,
+          num_ctx: OLLAMA_NUM_CTX,
           ...(parsed.data.max_tokens ? { num_predict: parsed.data.max_tokens } : {}),
         },
       }),

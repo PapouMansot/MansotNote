@@ -58,6 +58,10 @@ services:
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
       SESSION_DAYS: 30
       OLLAMA_URL: http://ollama:11434/v1
+      # Contexte du 9B, aligné sur le modèle tel que chargé en prod (32k) :
+      # sans num_ctx, une recharge éventuelle retomberait sur le défaut
+      # Ollama (4096 tokens) et tronquerait les prompts du copilote.
+      OLLAMA_NUM_CTX: 32768
       ALLOWED_AI_MODELS: qwen3.8:9b-q6-32k
       EMBEDDING_MODEL: qwen3-embedding:0.6b-8k
     healthcheck:

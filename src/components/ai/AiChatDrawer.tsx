@@ -26,9 +26,10 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '@/store/app-store';
 import {
-  chatComplete,
+  chatStream,
   isAiConfigured,
   resolveAiSettings,
+  sanitizeHistoryContent,
   type AiConfig,
   type ChatMessage,
 } from '@/lib/ai';
@@ -338,6 +339,9 @@ export function AiChatDrawer({
       // Le repli BM25 est volontairement silencieux : le chat continue même
       // si le serveur d'embeddings est momentanément indisponible.
 
+      // Historique nettoyé : les blocs ```action:…``` sont retirés (leur JSON
+      // porte le contenu complet de notes, inutile dans le contexte) et chaque
+      // tour est borné — le préfill du 9B gagne 1 à 3 s sur un fil long.
       const historyForAi: ChatMessage[] = [
         {
           role: 'system',
@@ -348,15 +352,54 @@ export function AiChatDrawer({
         ...messages
           .filter((m) => m.id !== 'welcome')
           .slice(-8)
-          .map((m) => ({ role: m.role, content: m.content })),
+          .map((m) => ({ role: m.role, content: sanitizeHistoryContent(m.content) })),
         { role: 'user', content: textToSend },
       ];
 
-      const response = await chatComplete(aiConfig, historyForAi, {
-        temperature: 0.7,
-      });
+      // Streaming : le tour assistant est créé d'avance et rempli en direct —
+      // les premiers tokens s'affichent dès qu'ils sortent du modèle
+      // (~4 s, le prefill) au lieu d'un spinner pendant toute la réponse.
+      const assistantTurnId = `ai-${Date.now()}`;
+      setMessages((prev) => [
+        ...prev,
+        { id: assistantTurnId, role: 'assistant' as const, content: '' },
+      ]);
 
-      const parsed = parseActionsFromResponse(response);
+      let raw = '';
+      let truncated = false;
+      let streamError: Error | null = null;
+      try {
+        const streamed = await chatStream(aiConfig, historyForAi, {
+          temperature: 0.7,
+          maxTokens: 2048,
+          onText: (partial) =>
+            setMessages((prev) =>
+              prev.map((t) =>
+                t.id === assistantTurnId
+                  ? { ...t, content: sanitizeHistoryContent(partial, 20000).replace(/```action:[a-z_]+[\s\S]*$/, '') }
+                  : t,
+              ),
+            ),
+        });
+        raw = streamed.text;
+        truncated = streamed.truncated;
+      } catch (err) {
+        streamError = err instanceof Error ? err : new Error("La communication avec l'IA a échoué.");
+      }
+
+      if (streamError) {
+        setMessages((prev) => [
+          ...prev.filter((t) => t.id !== assistantTurnId),
+          {
+            id: String(Date.now() + 1),
+            role: 'assistant',
+            content: `⚠️ **Erreur** : ${streamError.message}\n\n*Astuce : clique sur l'icône ⚙️ en haut à droite pour vérifier ton endpoint (OpenAI, OpenRouter, Ollama ou LM Studio) et sélectionner un modèle valide.*`,
+          },
+        ]);
+        return;
+      }
+
+      const parsed = parseActionsFromResponse(raw);
 
     // Garde-fou déterministe pour la suppression globale
     const wantsDeleteAllCards = isDeleteAllCardsRequest(textToSend);
@@ -417,14 +460,17 @@ export function AiChatDrawer({
       action = executeActionDirectly(action);
     }
 
-    const assistantTurn: AssistantTurn = {
-        id: String(Date.now() + 1),
-        role: 'assistant',
-        content: parsed.cleanContent,
-        action,
-      };
-
-      setMessages((prev) => [...prev, assistantTurn]);
+    // Le tour assistant existe déjà (rempli en direct par le stream) :
+    // on ne fait que figer le contenu net + l'action + l'indication
+    // d'éventuelle coupure du flux.
+    const finalContent = [parsed.cleanContent, truncated ? '\n\n_— réponse coupée, contenu partiel —_' : ''].join('');
+    setMessages((prev) =>
+      prev.map((t) =>
+        t.id === assistantTurnId
+          ? { ...t, content: finalContent, action }
+          : t,
+      ),
+    );
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'La communication avec l\'IA a échoué.';
       const errorTurn: AssistantTurn = {
