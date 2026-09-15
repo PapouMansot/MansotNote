@@ -38,6 +38,7 @@ import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer';
 import { IconButton } from '@/components/ui/IconButton';
 import { Button } from '@/components/ui/Button';
 import { AiSettingsFields } from './AiSettingsFields';
+import { ReasoningBlock } from './ReasoningBlock';
 import { cn } from '@/lib/utils';
 
 export interface ActionProposal {
@@ -58,6 +59,8 @@ interface AssistantTurn {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  reasoning?: string;
+  isStreaming?: boolean;
   action?: ActionProposal;
 }
 
@@ -362,26 +365,36 @@ export function AiChatDrawer({
       const assistantTurnId = `ai-${Date.now()}`;
       setMessages((prev) => [
         ...prev,
-        { id: assistantTurnId, role: 'assistant' as const, content: '' },
+        { id: assistantTurnId, role: 'assistant' as const, content: '', reasoning: '', isStreaming: true },
       ]);
 
       let raw = '';
+      let streamedReasoning = '';
       let truncated = false;
       let streamError: Error | null = null;
       try {
         const streamed = await chatStream(aiConfig, historyForAi, {
           temperature: 0.7,
           maxTokens: 2048,
+          onReasoning: (partialReasoning) =>
+            setMessages((prev) =>
+              prev.map((t) =>
+                t.id === assistantTurnId
+                  ? { ...t, reasoning: partialReasoning }
+                  : t,
+              ),
+            ),
           onText: (partial) =>
             setMessages((prev) =>
               prev.map((t) =>
                 t.id === assistantTurnId
-                  ? { ...t, content: sanitizeHistoryContent(partial, 20000).replace(/```action:[a-z_]+[\s\S]*$/, '') }
+                  ? { ...t, content: partial.replace(/```action:[a-z_]+[\s\S]*$/, '') }
                   : t,
               ),
             ),
         });
         raw = streamed.text;
+        streamedReasoning = streamed.reasoning;
         truncated = streamed.truncated;
       } catch (err) {
         streamError = err instanceof Error ? err : new Error("La communication avec l'IA a échoué.");
@@ -467,7 +480,7 @@ export function AiChatDrawer({
     setMessages((prev) =>
       prev.map((t) =>
         t.id === assistantTurnId
-          ? { ...t, content: finalContent, action }
+          ? { ...t, content: finalContent, reasoning: streamedReasoning, action, isStreaming: false }
           : t,
       ),
     );
@@ -812,7 +825,27 @@ export function AiChatDrawer({
               {turn.role === 'user' ? (
                 <p className="whitespace-pre-wrap">{turn.content}</p>
               ) : (
-                <MarkdownRenderer markdown={turn.content} />
+                <div>
+                  {turn.role === 'assistant' && (turn.reasoning || (turn.isStreaming && !turn.content)) && (
+                    <ReasoningBlock
+                      reasoning={turn.reasoning || ''}
+                      isStreaming={turn.isStreaming && !turn.content}
+                    />
+                  )}
+                  {turn.content ? (
+                    <div>
+                      <MarkdownRenderer markdown={turn.content} />
+                      {turn.isStreaming && (
+                        <span className="inline-block animate-pulse text-indigo-500 font-mono text-xs ml-0.5">▋</span>
+                      )}
+                    </div>
+                  ) : turn.isStreaming ? (
+                    <div className="flex items-center gap-2 text-xs text-zinc-400 py-1">
+                      <Loader2 size={13} className="animate-spin text-indigo-500" />
+                      <span>Le copilote prépare sa réponse…</span>
+                    </div>
+                  ) : null}
+                </div>
               )}
             </div>
 
@@ -909,7 +942,7 @@ export function AiChatDrawer({
           </div>
         ))}
 
-        {loading && (
+        {loading && !messages.some((m) => m.isStreaming) && (
           <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
             <Loader2 size={14} className="animate-spin text-indigo-500" />
             <span>Le copilote réfléchit et prépare l'action…</span>

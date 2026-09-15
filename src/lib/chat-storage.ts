@@ -11,6 +11,8 @@ export interface ChatTurn {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  reasoning?: string;
+  isStreaming?: boolean;
   action?: ActionProposal;
 }
 
@@ -103,4 +105,3 @@ export function deriveConversationTitle(userPrompt: string): string {
   if (firstLine.length <= 36) return firstLine;
   return firstLine.slice(0, 35).trim() + '…';
 }
-

@@ -29,9 +29,10 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '@/store/app-store';
 import {
-  chatComplete,
+  chatStream,
   isAiConfigured,
   resolveAiSettings,
+  sanitizeHistoryContent,
   type AiConfig,
   type ChatMessage,
 } from '@/lib/ai';
@@ -40,6 +41,7 @@ import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer';
 import { Button } from '@/components/ui/Button';
 import { AiSettingsFields } from '@/components/ai/AiSettingsFields';
 import { isDeleteAllCardsRequest, type ActionProposal } from '@/components/ai/AiChatDrawer';
+import { ReasoningBlock } from '@/components/ai/ReasoningBlock';
 import { cn } from '@/lib/utils';
 import { formatTime } from '@/lib/dates';
 import {
@@ -151,6 +153,7 @@ export function ChatView() {
   const updateActiveMessages = (
     updater: (prev: ChatTurn[]) => ChatTurn[],
     newTitle?: string,
+    persist = true,
   ) => {
     setConversations((prev) => {
       const targetId = activeConvId || prev[0]?.id;
@@ -166,7 +169,9 @@ export function ChatView() {
         }
         return c;
       });
-      saveConversationsToStorage(updated);
+      if (persist) {
+        saveConversationsToStorage(updated);
+      }
       return updated;
     });
   };
@@ -388,15 +393,79 @@ export function ChatView() {
         ...messages
           .filter((m) => !m.id.startsWith('welcome'))
           .slice(-10)
-          .map((m) => ({ role: m.role, content: m.content })),
+          .map((m) => ({ role: m.role, content: sanitizeHistoryContent(m.content) })),
         { role: 'user', content: textToSend },
       ];
 
-      const response = await chatComplete(aiConfig, historyForAi, {
-        temperature: isCorrectionIntent ? 0.1 : 0.7,
-      });
+      const assistantTurnId = `ai-${Date.now()}`;
+      const initialAssistantTurn: ChatTurn = {
+        id: assistantTurnId,
+        role: 'assistant',
+        content: '',
+        reasoning: '',
+        isStreaming: true,
+      };
+      updateActiveMessages((prev) => [...prev, initialAssistantTurn]);
 
-      const parsed = parseActionsFromResponse(response);
+      let raw = '';
+      let streamedReasoning = '';
+      let truncated = false;
+      let streamError: Error | null = null;
+
+      try {
+        const streamed = await chatStream(aiConfig, historyForAi, {
+          temperature: isCorrectionIntent ? 0.1 : 0.7,
+          maxTokens: 2048,
+          onReasoning: (partialReasoning) => {
+            streamedReasoning = partialReasoning;
+            updateActiveMessages((prev) =>
+              prev.map((t) =>
+                t.id === assistantTurnId
+                  ? { ...t, reasoning: partialReasoning }
+                  : t,
+              ),
+              undefined,
+              false,
+            );
+          },
+          onText: (partialText) => {
+            updateActiveMessages((prev) =>
+              prev.map((t) =>
+                t.id === assistantTurnId
+                  ? {
+                      ...t,
+                      content: partialText.replace(/```action:[a-z_]+[\s\S]*$/, ''),
+                    }
+                  : t,
+              ),
+              undefined,
+              false,
+            );
+          },
+        });
+        raw = streamed.text;
+        streamedReasoning = streamed.reasoning;
+        truncated = streamed.truncated;
+      } catch (err) {
+        streamError = err instanceof Error ? err : new Error("La communication avec l'IA a échoué.");
+      }
+
+      if (streamError) {
+        updateActiveMessages((prev) =>
+          prev.map((t) =>
+            t.id === assistantTurnId
+              ? {
+                  ...t,
+                  content: `⚠️ **Erreur** : ${streamError!.message}\n\n*Astuce : clique sur « Paramètres IA » en haut à droite pour vérifier la configuration.*`,
+                  isStreaming: false,
+                }
+              : t,
+          ),
+        );
+        return;
+      }
+
+      const parsed = parseActionsFromResponse(raw);
       const wantsDeleteAllCards = isDeleteAllCardsRequest(textToSend);
       const activeDraft = useAppStore.getState().ui.noteDraft;
 
@@ -454,14 +523,20 @@ export function ChatView() {
         action = executeActionDirectly(action);
       }
 
-      const assistantTurn: ChatTurn = {
-        id: String(Date.now() + 1),
-        role: 'assistant',
-        content: cleanContent,
-        action,
-      };
-
-      updateActiveMessages((prev) => [...prev, assistantTurn]);
+      const finalContent = [cleanContent, truncated ? '\n\n_— réponse coupée, contenu partiel —_' : ''].join('');
+      updateActiveMessages((prev) =>
+        prev.map((t) =>
+          t.id === assistantTurnId
+            ? {
+                ...t,
+                content: finalContent,
+                reasoning: streamedReasoning,
+                action,
+                isStreaming: false,
+              }
+            : t,
+        ),
+      );
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'La communication avec l\'IA a échoué.';
       const errorTurn: ChatTurn = {
@@ -900,7 +975,27 @@ export function ChatView() {
                   {turn.role === 'user' ? (
                     <p className="whitespace-pre-wrap">{turn.content}</p>
                   ) : (
-                    <MarkdownRenderer markdown={turn.content} />
+                    <div>
+                      {turn.role === 'assistant' && (turn.reasoning || (turn.isStreaming && !turn.content)) && (
+                        <ReasoningBlock
+                          reasoning={turn.reasoning || ''}
+                          isStreaming={turn.isStreaming && !turn.content}
+                        />
+                      )}
+                      {turn.content ? (
+                        <div>
+                          <MarkdownRenderer markdown={turn.content} />
+                          {turn.isStreaming && (
+                            <span className="inline-block animate-pulse text-indigo-500 font-mono text-sm ml-0.5">▋</span>
+                          )}
+                        </div>
+                      ) : turn.isStreaming ? (
+                        <div className="flex items-center gap-2 text-xs text-zinc-400 py-1">
+                          <Loader2 size={14} className="animate-spin text-indigo-500" />
+                          <span>Le Copilote prépare sa réponse…</span>
+                        </div>
+                      ) : null}
+                    </div>
                   )}
                 </div>
 
@@ -996,7 +1091,7 @@ export function ChatView() {
               </div>
             ))}
 
-            {loading && (
+            {loading && !messages.some((m) => m.isStreaming) && (
               <div className="flex items-center gap-2 text-xs font-medium text-indigo-600 dark:text-indigo-400">
                 <Loader2 size={16} className="animate-spin" />
                 <span>Le Copilote réfléchit et prépare sa réponse…</span>

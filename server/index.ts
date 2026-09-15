@@ -21,7 +21,7 @@ const SESSION_DAYS = Math.max(1, Number(process.env.SESSION_DAYS || 30));
 const isProduction = process.env.NODE_ENV === 'production';
 
 const app = express();
-app.set('trust proxy', 1);
+app.set('trust proxy', ['loopback', 'linklocal', 'uniquelocal']);
 // L'API ne sert que du JSON : une CSP verrouillée est sans risque ici et
 // neutralise tout rendu de contenu injecté dans une réponse d'erreur.
 app.use(helmet({
@@ -268,12 +268,27 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
     })).min(1).max(30),
     temperature: z.number().min(0).max(2).optional().default(0.15),
     max_tokens: z.number().int().min(1).max(4096).optional(),
-    think: z.boolean().optional().default(false),
+    think: z.boolean().optional(),
     stream: z.boolean().optional().default(false),
   }).safeParse(req.body);
 
   if (!parsed.success) return res.status(400).json({ error: 'Requête IA invalide' });
   if (!isAllowedAiModel(parsed.data.model)) return res.status(403).json({ error: 'Modèle IA non autorisé' });
+
+  const totalChars = parsed.data.messages.reduce((acc, m) => acc + m.content.length, 0);
+  if (totalChars > 120_000) {
+    return res.status(400).json({ error: 'Historique de messages trop volumineux (120k caractères max)' });
+  }
+
+  // Interrompt immédiatement le calcul Ollama si le client se déconnecte ou annule
+  const abortController = new AbortController();
+  req.on('close', () => {
+    if (!res.writableEnded) abortController.abort();
+  });
+  const timeoutSignal = AbortSignal.timeout(600_000);
+  const fetchSignal = 'any' in AbortSignal
+    ? AbortSignal.any([timeoutSignal, abortController.signal])
+    : abortController.signal;
 
   // Streaming : on relaie la NDJSON d'Ollama en SSE compatible OpenAI
   // (data: {choices:[{delta:{content}}]}… puis data: [DONE]). Sans ça le
@@ -287,7 +302,7 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
           model: parsed.data.model,
           messages: parsed.data.messages,
           stream: true,
-          think: parsed.data.think,
+          ...(parsed.data.think !== undefined ? { think: parsed.data.think } : {}),
           keep_alive: -1,
           options: {
             temperature: parsed.data.temperature,
@@ -295,7 +310,7 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
             ...(parsed.data.max_tokens ? { num_predict: parsed.data.max_tokens } : {}),
           },
         }),
-        signal: AbortSignal.timeout(600_000),
+        signal: fetchSignal,
       });
 
       if (!aiRes.ok || !aiRes.body) {
@@ -307,6 +322,9 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       res.setHeader('Cache-Control', 'no-cache, no-transform');
       res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      req.socket?.setNoDelay(true);
+      res.socket?.setNoDelay(true);
       res.flushHeaders?.();
 
       const reader = aiRes.body.getReader();
@@ -315,6 +333,9 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
       const chunkId = `chatcmpl-${Date.now()}`;
       const sendChunk = (delta: Record<string, unknown>) => {
         res.write(`data: ${JSON.stringify({ id: chunkId, object: 'chat.completion.chunk', choices: [{ index: 0, delta }] })}\n\n`);
+        if (typeof (res as any).flush === 'function') {
+          (res as any).flush();
+        }
       };
       sendChunk({ role: 'assistant' });
 
@@ -327,21 +348,33 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
           const line = buffer.slice(0, newline).trim();
           buffer = buffer.slice(newline + 1);
           if (line === '') continue;
-          const event = JSON.parse(line) as { message?: { role?: string; content?: string }; done?: boolean; error?: string };
+          const event = JSON.parse(line) as {
+            message?: { role?: string; content?: string; thinking?: string };
+            done?: boolean;
+            error?: string;
+          };
           if (event.error) {
-            res.write(`data: ${JSON.stringify({ error: event.error })}\n\n`);
+            res.write(`data: ${JSON.stringify({ error: { message: event.error } })}\n\n`);
             continue;
           }
-          if (event.message?.content) sendChunk({ content: event.message.content });
+          if (event.message?.thinking) {
+            sendChunk({ reasoning_content: event.message.thinking });
+          }
+          if (event.message?.content) {
+            sendChunk({ content: event.message.content });
+          }
           if (event.done) { sendChunk({}); res.write('data: [DONE]\n\n'); }
         }
       }
       res.end();
     } catch (error) {
-      console.error('[ai-proxy-stream] erreur:', error);
-      // En-têtes déjà envoyés : on clôture proprement le flux SSE.
-      res.write(`data: ${JSON.stringify({ error: 'Flux IA interrompu' })}\n\n`);
-      res.end();
+      if (!abortController.signal.aborted) {
+        console.error('[ai-proxy-stream] erreur:', error);
+      }
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ error: { message: 'Flux IA interrompu' } })}\n\n`);
+        res.end();
+      }
     }
     return;
   }
@@ -354,7 +387,7 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
         model: parsed.data.model,
         messages: parsed.data.messages,
         stream: false,
-        think: parsed.data.think,
+        ...(parsed.data.think !== undefined ? { think: parsed.data.think } : {}),
         keep_alive: -1,
         options: {
           temperature: parsed.data.temperature,
@@ -362,7 +395,7 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
           ...(parsed.data.max_tokens ? { num_predict: parsed.data.max_tokens } : {}),
         },
       }),
-      signal: AbortSignal.timeout(600_000),
+      signal: fetchSignal,
     });
 
     if (!aiRes.ok) {

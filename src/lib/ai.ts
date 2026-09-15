@@ -418,8 +418,36 @@ function isAbortError(error: unknown): boolean {
 /** Résultat d'un streaming : texte final nettoyé + drapeau de coupure. */
 export interface ChatStreamResult {
   text: string;
+  /** Texte de réflexion interne / raisonnement capturé en direct. */
+  reasoning: string;
   /** true si le flux s'est interrompu après réception d'un contenu partiel. */
   truncated: boolean;
+}
+
+export interface ChatStreamOptions extends ChatOptions {
+  onText?: (text: string) => void;
+  onReasoning?: (reasoning: string) => void;
+}
+
+export interface ReasoningExtraction {
+  reasoning: string;
+  content: string;
+  isThinking: boolean;
+}
+
+/** Extrait le raisonnement inline (<think>...</think>) et le contenu utile d'un flux. */
+export function extractReasoningAndContent(raw: string): ReasoningExtraction {
+  const thinkMatch = raw.match(/<think(?:ing)?>([\s\S]*?)(?:<\/think(?:ing)?>|$)/i);
+  if (!thinkMatch) {
+    return { reasoning: '', content: raw, isThinking: false };
+  }
+  const hasClosing = /<\/think(?:ing)?>/i.test(raw);
+  const reasoning = thinkMatch[1] ?? '';
+  let content = '';
+  if (hasClosing) {
+    content = raw.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '').trimStart();
+  }
+  return { reasoning, content, isThinking: !hasClosing };
 }
 
 /**
@@ -435,7 +463,7 @@ export interface ChatStreamResult {
 export async function chatStream(
   config: AiConfig,
   messages: ChatMessage[],
-  options: ChatOptions & { onText?: (text: string) => void } = {},
+  options: ChatStreamOptions = {},
 ): Promise<ChatStreamResult> {
   if (!isAiConfigured(config)) {
     throw new Error('IA non configurée (endpoint et modèle requis)');
@@ -461,7 +489,9 @@ export async function chatStream(
     options.signal.addEventListener('abort', () => controller.abort(), { once: true });
   }
   let response: Response;
-  let collected = '';
+  let collectedContent = '';
+  let collectedReasoning = '';
+  let explicitReasoning = '';
   try {
     try {
       response = await fetch(url, {
@@ -502,22 +532,34 @@ export async function chatStream(
     const contentType = response.headers.get('content-type') || '';
     if (contentType.includes('application/json')) {
       const payload = (await response.json().catch(() => null)) as {
-        choices?: Array<{ message?: { content?: string }; text?: string }>;
+        choices?: Array<{
+          message?: { content?: string; reasoning_content?: string; thinking?: string };
+          text?: string;
+        }>;
         error?: { message?: string };
       } | null;
       if (payload?.error?.message) throw new Error(`Erreur serveur IA : ${payload.error.message}`);
-      const content = payload?.choices?.[0]?.message?.content ?? payload?.choices?.[0]?.text ?? '';
+      const raw = payload?.choices?.[0]?.message?.content ?? payload?.choices?.[0]?.text ?? '';
+      const explicitReasoning = payload?.choices?.[0]?.message?.reasoning_content ?? payload?.choices?.[0]?.message?.thinking ?? '';
+      const parsed = extractReasoningAndContent(raw);
+      const reasoning = explicitReasoning || parsed.reasoning;
+      const content = explicitReasoning ? raw : parsed.content;
+      if (reasoning) options.onReasoning?.(reasoning);
       options.onText?.(content);
       const cleaned = unwrapFences(stripReasoning(content));
-      if (cleaned === '') throw new Error('L\'IA a renvoyé une réponse vide ou inattendue');
-      return { text: cleaned, truncated: false };
+      if (cleaned === '' && raw.trim() === '') throw new Error('L\'IA a renvoyé une réponse vide ou inattendue');
+      return {
+        text: cleaned === '' ? content.trim() : cleaned,
+        reasoning: reasoning.trim(),
+        truncated: false,
+      };
     }
 
     if (!response.body) throw new Error('Flux de réponse indisponible (corps vide)');
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let text = '';
+    let rawContent = '';
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -531,29 +573,65 @@ export async function chatStream(
         if (data === '[DONE]') continue;
         let payload: {
           error?: { message?: string };
-          choices?: Array<{ delta?: { content?: string } }>;
+          choices?: Array<{
+            delta?: {
+              content?: string;
+              reasoning_content?: string;
+              thinking?: string;
+            };
+          }>;
         };
         try { payload = JSON.parse(data); } catch { continue; }
         if (payload.error?.message) throw new Error(`Erreur serveur IA : ${payload.error.message}`);
-        const delta = payload.choices?.[0]?.delta?.content;
-        if (typeof delta === 'string' && delta !== '') {
-          text += delta;
-          collected = text;
-          options.onText?.(text);
+        const delta = payload.choices?.[0]?.delta;
+        const reasoningDelta = delta?.reasoning_content ?? delta?.thinking;
+        const contentDelta = delta?.content;
+
+        if (typeof reasoningDelta === 'string' && reasoningDelta !== '') {
+          explicitReasoning += reasoningDelta;
+          collectedReasoning = explicitReasoning;
+          options.onReasoning?.(explicitReasoning);
+        }
+
+        if (typeof contentDelta === 'string' && contentDelta !== '') {
+          rawContent += contentDelta;
+          collectedContent = rawContent;
+          if (explicitReasoning !== '') {
+            options.onText?.(rawContent);
+          } else {
+            const parsed = extractReasoningAndContent(rawContent);
+            collectedReasoning = parsed.reasoning;
+            if (parsed.reasoning !== '') {
+              options.onReasoning?.(parsed.reasoning);
+            }
+            options.onText?.(parsed.content);
+          }
         }
       }
     }
-    const cleaned = unwrapFences(stripReasoning(text));
-    if (cleaned === '' && text.trim() === '') {
+    const finalReasoning = explicitReasoning || extractReasoningAndContent(rawContent).reasoning;
+    const finalContent = explicitReasoning ? rawContent : extractReasoningAndContent(rawContent).content;
+    const cleaned = unwrapFences(stripReasoning(finalContent));
+    if (cleaned === '' && rawContent.trim() === '') {
       throw new Error('L\'IA a renvoyé une réponse vide ou inattendue');
     }
-    return { text: cleaned === '' ? text.trim() : cleaned, truncated: false };
+    return {
+      text: cleaned === '' ? finalContent.trim() : cleaned,
+      reasoning: finalReasoning.trim(),
+      truncated: false,
+    };
   } catch (error) {
     // Flux coupé après réception d'une partie du texte : on conserve le
     // contenu déjà arrivé plutôt que de jeter tout le travail du modèle.
-    if (collected.trim() !== '') {
-      const cleaned = unwrapFences(stripReasoning(collected));
-      if (cleaned.trim() !== '') return { text: cleaned, truncated: true };
+    if (collectedContent.trim() !== '' || collectedReasoning.trim() !== '') {
+      const finalReasoning = explicitReasoning || extractReasoningAndContent(collectedContent).reasoning;
+      const finalContent = explicitReasoning ? collectedContent : extractReasoningAndContent(collectedContent).content;
+      const cleaned = unwrapFences(stripReasoning(finalContent));
+      return {
+        text: cleaned === '' ? finalContent.trim() : cleaned,
+        reasoning: finalReasoning.trim(),
+        truncated: true,
+      };
     }
     if (isAbortError(error)) {
       throw new Error(
