@@ -1,6 +1,11 @@
 -- Migration 003: Schéma relationnel propre pour Supabase (notes, dossiers, tags, kanban)
 
-DROP VIEW IF EXISTS notes CASCADE;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_views WHERE schemaname = 'public' AND viewname = 'notes') THEN
+    DROP VIEW public.notes CASCADE;
+  END IF;
+END $$;
 
 -- 1. Folders
 CREATE TABLE IF NOT EXISTS folders (
@@ -165,4 +170,3 @@ SELECT
   COALESCE((cd->>'updatedAt')::bigint, (extract(epoch from now()) * 1000)::bigint)
 FROM workspaces w, jsonb_array_elements(COALESCE(w.state->'cards', '[]'::jsonb)) AS cd
 ON CONFLICT (id) DO NOTHING;
-
