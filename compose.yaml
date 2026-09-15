@@ -18,7 +18,7 @@ services:
       retries: 10
 
   mansotnote-backup:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     container_name: mansotnote-backup
     restart: unless-stopped
     security_opt:
