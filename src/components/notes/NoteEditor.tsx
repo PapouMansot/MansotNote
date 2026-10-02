@@ -15,6 +15,7 @@ import {
   Eye,
   Folder,
   FolderMinus,
+  History,
   Languages,
   List,
   Pencil,
@@ -48,6 +49,7 @@ import { IconButton } from '@/components/ui/IconButton';
 import { Menu } from '@/components/ui/Menu';
 import { AiTransformModal } from '@/components/ai/AiTransformModal';
 import { ConfirmModal } from '@/components/ui/ConfirmModal';
+import { NoteHistoryModal } from './NoteHistoryModal';
 import { FormattingToolbar } from './FormattingToolbar';
 import { FloatingSelectionMenu } from './FloatingSelectionMenu';
 import {
@@ -104,6 +106,14 @@ export function NoteEditor() {
   } | null>(null);
   const [floatingPos, setFloatingPos] = useState<{ x: number; y: number } | null>(null);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // L'historique n'existe que pour les notes stockées sur le serveur.
+  const hasHistory = state.storage.id === 'remote';
+  // Enregistre d'abord la frappe en cours, pour qu'elle figure dans l'historique.
+  const openHistory = async () => {
+    await state.saveDraftNow();
+    setHistoryOpen(true);
+  };
 
   // Historique local pour Annuler / Rétablir
   const [history, setHistory] = useState<string[]>([draft?.content ?? '']);
@@ -766,6 +776,9 @@ export function NoteEditor() {
             active={note.pinned}
             onClick={() => state.togglePin(note.id)}
           />
+          {hasHistory && (
+            <IconButton label="Historique des versions" icon={<History size={15} />} onClick={() => void openHistory()} />
+          )}
           <IconButton
             label="Dupliquer"
             icon={<Copy size={15} />}
@@ -885,10 +898,19 @@ export function NoteEditor() {
         />
       )}
 
+      {historyOpen && note && (
+        <NoteHistoryModal noteId={note.id} noteTitle={note.title} onClose={() => setHistoryOpen(false)} />
+      )}
+
       <ConfirmModal
         open={confirmDeleteOpen}
         title="Supprimer la note"
-        message={`Es-tu sûr de vouloir supprimer définitivement la note « ${note.title || 'Sans titre'} » ?`}
+        message={
+          hasHistory
+            ? `Supprimer la note « ${note.title || 'Sans titre'} » ?`
+            : `Es-tu sûr de vouloir supprimer définitivement la note « ${note.title || 'Sans titre'} » ?`
+        }
+        hint={hasHistory ? 'Elle reste récupérable pendant 90 jours : Compte & Accès distant → Corbeille.' : undefined}
         confirmLabel="Supprimer"
         onConfirm={() => {
           state.deleteNote(note.id);

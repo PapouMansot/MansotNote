@@ -18,6 +18,7 @@ import { changeServerPassword } from '@/lib/server-auth';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { useAppStore } from '@/store/app-store';
+import { NoteTrashPanel } from '@/components/notes/NoteTrashPanel';
 import type { Folder, Tag } from '@/types';
 
 interface ApiToken {
@@ -274,7 +275,7 @@ function TokenPolicyFields({ draft, onChange, folders, tags, folderLabel }: Fiel
 }
 
 export function ServerAccountModal({ onClose }: { onClose: () => void }) {
-  const [activeTab, setActiveTab] = useState<'security' | 'tokens'>('tokens');
+  const [activeTab, setActiveTab] = useState<'security' | 'tokens' | 'trash'>('tokens');
 
   const folders = useAppStore((s) => s.data.folders);
   const tags = useAppStore((s) => s.data.tags);
@@ -424,7 +425,7 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const tabClass = (tab: 'tokens' | 'security') =>
+  const tabClass = (tab: 'tokens' | 'security' | 'trash') =>
     clsx(
       'flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold',
       activeTab === tab
@@ -442,6 +443,10 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
         <button type="button" onClick={() => setActiveTab('security')} className={tabClass('security')}>
           <ShieldCheck size={14} />
           <span>Sécurité du mot de passe</span>
+        </button>
+        <button type="button" onClick={() => setActiveTab('trash')} className={tabClass('trash')}>
+          <Trash2 size={14} />
+          <span>Corbeille</span>
         </button>
       </div>
 
@@ -630,6 +635,8 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
             )}
           </div>
         </div>
+      ) : activeTab === 'trash' ? (
+        <NoteTrashPanel />
       ) : (
         <form onSubmit={submitPassword} className="space-y-3">
           <div className="flex items-start gap-2 rounded-lg bg-emerald-500/10 p-3 text-xs text-emerald-700 dark:text-emerald-300">

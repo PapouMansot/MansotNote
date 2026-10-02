@@ -12,6 +12,8 @@ export interface ConfirmModalProps {
   confirmLabel?: string;
   cancelLabel?: string;
   variant?: 'danger' | 'primary';
+  /** Remplace le texte secondaire par défaut (« Cette action est irréversible… » en variante danger). */
+  hint?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -23,6 +25,7 @@ export function ConfirmModal({
   confirmLabel = 'Confirmer',
   cancelLabel = 'Annuler',
   variant = 'danger',
+  hint,
   onConfirm,
   onCancel,
 }: ConfirmModalProps) {
@@ -67,9 +70,10 @@ export function ConfirmModal({
             {message}
           </p>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            {variant === 'danger'
-              ? 'Cette action est irréversible. Tu peux aussi choisir d\'archiver pour conserver l\'élément.'
-              : ''}
+            {hint ??
+              (variant === 'danger'
+                ? 'Cette action est irréversible. Tu peux aussi choisir d\'archiver pour conserver l\'élément.'
+                : '')}
           </p>
         </div>
       </div>

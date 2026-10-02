@@ -18,6 +18,7 @@ import {
   type TokenPolicy,
 } from './token-policy.js';
 import { clientIpOf, evaluateAccess, isPrivateRequest, validateAllowedIps } from './network.js';
+import { makeDiff, toUnified } from './diff.js';
 import {
   createSessionToken,
   hashPassword,
@@ -356,6 +357,7 @@ app.put('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) =
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await setActor(client, 'navigateur');
     const current = await client.query('SELECT version FROM workspaces WHERE user_id=$1 FOR UPDATE', [req.user!.id]);
     const version = current.rowCount ? Number(current.rows[0].version) : 0;
     if (expectedVersion !== undefined && expectedVersion !== version) {
@@ -406,6 +408,187 @@ app.get(['/api/v1/notes', '/v1/notes'], dataLimiter, authenticate, async (req: A
   res.json(notes.rows);
 });
 
+// ==========================================
+// Historique des notes, à la Git : chaque modification est une version (auteur, date, message) ; la diff entre
+// deux versions se calcule à la demande ; restaurer crée une nouvelle version (donc s'annule aussi).
+// Les versions sont écrites par un déclencheur de la base (migration 007) ; l'API lui indique l'auteur.
+// ==========================================
+const VERSION_RETENTION_DAYS = 90;
+
+/** Auteur d'une écriture, tel qu'il apparaît dans l'historique. */
+function actorOf(req: AuthRequest): string {
+  return req.apiToken ? ('bot:' + req.apiToken.name).slice(0, 100) : 'navigateur';
+}
+
+/** Auteur et message de la version créée par les écritures de la transaction en cours (lus par le déclencheur). */
+async function setActor(client: PoolClient, actor: string, message?: string | null): Promise<void> {
+  await client.query("SELECT set_config('mansot.actor', $1, true), set_config('mansot.message', $2, true)", [actor, message ?? '']);
+}
+
+/** Note actuelle visible par ce jeton (périmètre de dossiers, tags interdits) ; null sinon. */
+async function visibleNote(req: AuthRequest, id: string) {
+  const result = await pool.query(`SELECT ${NOTE_COLUMNS} FROM notes WHERE id=$1 AND user_id=$2`, [id, req.user!.id]);
+  const note = result.rows[0];
+  if (!note || (req.apiToken && (!inFolderScope(req, note.folderId) || hasDeniedTag(req, note.tagIds)))) return null;
+  return note;
+}
+
+/**
+ * Autorise la lecture de l'historique d'une note et répond lui-même sinon. Un jeton ne voit que l'historique des notes
+ * qu'il peut lire ; l'historique d'une note supprimée est réservé à la session navigateur.
+ */
+async function historyAccess(req: AuthRequest, res: Response, id: string): Promise<'live' | 'deleted' | null> {
+  if (req.apiToken && !req.apiToken.permissions.read) {
+    res.status(403).json({ error: 'Permission de lecture refusée pour ce jeton' });
+    return null;
+  }
+  const exists = await pool.query('SELECT 1 FROM notes WHERE id=$1 AND user_id=$2', [id, req.user!.id]);
+  if (exists.rowCount) {
+    if (await visibleNote(req, id)) return 'live';
+  } else if (!req.apiToken) {
+    const any = await pool.query('SELECT 1 FROM note_versions WHERE note_id=$1 AND user_id=$2 LIMIT 1', [id, req.user!.id]);
+    if (any.rowCount) return 'deleted';
+  }
+  res.status(404).json({ error: 'Note introuvable' });
+  return null;
+}
+
+const iso = (value: unknown) => (value instanceof Date ? value.toISOString() : value);
+const versionMeta = (row: Record<string, any>) => ({ seq: row.seq, actor: row.actor, message: row.message ?? null, createdAt: iso(row.createdAt), title: row.title, deleted: row.deleted });
+
+// Notes supprimées dont l'historique est conservé (corbeille) : session navigateur uniquement.
+app.get(['/api/v1/notes/trash', '/v1/notes/trash'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (!requireSession(req, res)) return;
+  const rows = await pool.query(
+    `SELECT DISTINCT ON (v.note_id) v.note_id as "noteId", v.title, v.folder_id as "folderId", v.actor, v.seq,
+            v.created_at as "deletedAt", length(v.content) as length
+     FROM note_versions v
+     WHERE v.user_id=$1 AND v.deleted AND NOT EXISTS (SELECT 1 FROM notes n WHERE n.id = v.note_id)
+     ORDER BY v.note_id, v.seq DESC`,
+    [req.user!.id],
+  );
+  const notes = rows.rows.map((r) => ({ ...r, deletedAt: iso(r.deletedAt) }));
+  notes.sort((a, b) => String(b.deletedAt).localeCompare(String(a.deletedAt)));
+  res.json({ notes: notes.slice(0, 200) });
+});
+
+app.get(['/api/v1/notes/:id/versions', '/v1/notes/:id/versions'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  const access = await historyAccess(req, res, req.params.id as string);
+  if (!access) return;
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+  // Une ligne de plus que demandé : elle sert de point de comparaison à la plus ancienne version affichée.
+  const rows = await pool.query(
+    `SELECT seq, actor, message, created_at as "createdAt", title, content, deleted
+     FROM note_versions WHERE note_id=$1 AND user_id=$2 ORDER BY seq DESC LIMIT $3`,
+    [req.params.id, req.user!.id, limit + 1],
+  );
+  const versions = rows.rows.slice(0, limit).map((row, index) => {
+    const previous = rows.rows[index + 1];
+    const stats = makeDiff(previous?.content ?? '', row.content, 0);
+    return { ...versionMeta(row), length: String(row.content).length, added: stats.added, removed: stats.removed };
+  });
+  res.json({ noteId: req.params.id, exists: access === 'live', versions });
+});
+
+app.get(['/api/v1/notes/:id/versions/:seq', '/v1/notes/:id/versions/:seq'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  const access = await historyAccess(req, res, req.params.id as string);
+  if (!access) return;
+  const row = await pool.query(
+    `SELECT seq, actor, message, created_at as "createdAt", title, content, folder_id as "folderId", tag_ids as "tagIds", deleted
+     FROM note_versions WHERE note_id=$1 AND user_id=$2 AND seq=$3`,
+    [req.params.id, req.user!.id, Number(req.params.seq) || 0],
+  );
+  if (!row.rowCount) return res.status(404).json({ error: 'Version introuvable' });
+  res.json({ ...versionMeta(row.rows[0]), content: row.rows[0].content, folderId: row.rows[0].folderId, tagIds: row.rows[0].tagIds });
+});
+
+// Diff entre deux versions : from (défaut : la version précédente de « to ») et to (défaut : la plus récente).
+app.get(['/api/v1/notes/:id/diff', '/v1/notes/:id/diff'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  const access = await historyAccess(req, res, req.params.id as string);
+  if (!access) return;
+  const latest = await pool.query('SELECT MAX(seq) AS seq FROM note_versions WHERE note_id=$1 AND user_id=$2', [req.params.id, req.user!.id]);
+  const to = req.query.to === undefined ? Number(latest.rows[0].seq) : Number(req.query.to);
+  const from = req.query.from === undefined ? to - 1 : Number(req.query.from);
+  if (!Number.isInteger(to) || !Number.isInteger(from) || to < 1 || from < 0) return res.status(400).json({ error: 'from et to doivent être des numéros de version' });
+  const load = async (seq: number) => (await pool.query(
+    `SELECT seq, actor, message, created_at as "createdAt", title, content, deleted FROM note_versions WHERE note_id=$1 AND user_id=$2 AND seq=$3`,
+    [req.params.id, req.user!.id, seq],
+  )).rows[0];
+  const target = await load(to);
+  const base = from === 0 ? null : await load(from);
+  if (!target || (from !== 0 && !base)) return res.status(404).json({ error: 'Version introuvable' });
+  const diff = makeDiff(base?.content ?? '', target.content);
+  res.json({
+    from: base ? versionMeta(base) : null,
+    to: versionMeta(target),
+    titleChange: (base?.title ?? null) !== target.title ? { from: base?.title ?? null, to: target.title } : null,
+    added: diff.added,
+    removed: diff.removed,
+    hunks: diff.hunks,
+    unified: toUnified(diff, base ? 'v' + base.seq : '(création)', 'v' + target.seq),
+  });
+});
+
+const restoreSchema = z.object({
+  seq: z.number().int().min(1),
+  message: z.string().trim().max(200).optional(),
+});
+
+// Restaure une version : le titre et le contenu de cette version deviennent ceux de la note, dans une nouvelle version.
+// Une note supprimée ne peut être restaurée que depuis la session navigateur.
+app.post(['/api/v1/notes/:id/restore', '/v1/notes/:id/restore'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.write) {
+    return res.status(403).json({ error: "Permission d'écriture refusée pour ce jeton" });
+  }
+  const parsed = restoreSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Données invalides', details: parsed.error.issues });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const version = await lockWorkspace(client, req.user!.id);
+    const wanted = await client.query(
+      'SELECT title, content, folder_id, tag_ids FROM note_versions WHERE note_id=$1 AND user_id=$2 AND seq=$3',
+      [req.params.id, req.user!.id, parsed.data.seq],
+    );
+    const old = wanted.rows[0];
+    const currentRes = await client.query(`SELECT ${NOTE_COLUMNS} FROM notes WHERE id=$1 AND user_id=$2 FOR UPDATE`, [req.params.id, req.user!.id]);
+    const current = currentRes.rows[0];
+    const hidden = current && req.apiToken && (!inFolderScope(req, current.folderId) || hasDeniedTag(req, current.tagIds));
+    if (!old || hidden || (!current && req.apiToken)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: old ? 'Note introuvable' : 'Version introuvable' });
+    }
+    await setActor(client, actorOf(req), parsed.data.message || 'Restauration de la version ' + parsed.data.seq);
+    const now = Date.now();
+    let restored;
+    if (current) {
+      restored = await client.query(
+        `UPDATE notes SET title=$3, content=$4, updated_at=$5 WHERE id=$1 AND user_id=$2 RETURNING ${NOTE_COLUMNS}`,
+        [req.params.id, req.user!.id, old.title, old.content, now],
+      );
+    } else {
+      const folder = old.folder_id
+        ? await client.query('SELECT 1 FROM folders WHERE id=$1 AND user_id=$2', [old.folder_id, req.user!.id])
+        : null;
+      restored = await client.query(
+        `INSERT INTO notes (id, user_id, folder_id, title, content, tag_ids, pinned, archived, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, false, false, $7, $7) RETURNING ${NOTE_COLUMNS}`,
+        [req.params.id, req.user!.id, folder?.rowCount ? old.folder_id : null, old.title, old.content, JSON.stringify(old.tag_ids ?? []), now],
+      );
+    }
+    const published = await publishWorkspace(client, req.user!.id, version);
+    await client.query('COMMIT');
+    if (published) enqueueWorkspaceIndex(req.user!.id, published.state, published.version);
+    res.json(restored.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[notes] erreur restauration:', err instanceof Error ? err.message : err);
+    res.status(500).json({ error: 'Impossible de restaurer la note' });
+  } finally {
+    client.release();
+  }
+});
+
 app.get(['/api/v1/notes/:id', '/v1/notes/:id'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
   if (req.apiToken && !req.apiToken.permissions.read) {
     return res.status(403).json({ error: 'Permission de lecture refusée pour ce jeton' });
@@ -448,6 +631,8 @@ async function publishWorkspace(client: PoolClient, userId: string, version: num
 }
 
 const createNoteSchema = z.object({
+  /** Message de la version, comme un message de commit. */
+  message: z.string().trim().max(200).optional(),
   title: z.string().trim().max(500).optional(),
   content: z.string().max(2_000_000).default(''),
   folderId: z.string().nullable().optional(),
@@ -487,6 +672,7 @@ app.post(['/api/v1/notes', '/v1/notes'], dataLimiter, authenticate, async (req: 
   try {
     await client.query('BEGIN');
     const version = await lockWorkspace(client, req.user!.id);
+    await setActor(client, actorOf(req), parsed.data.message);
     const result = await client.query(
       `INSERT INTO notes (id, user_id, folder_id, title, content, tag_ids, pinned, archived, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, false, $8, $8)
@@ -508,6 +694,7 @@ app.post(['/api/v1/notes', '/v1/notes'], dataLimiter, authenticate, async (req: 
 });
 
 const updateNoteSchema = z.object({
+  message: z.string().trim().max(200).optional(),
   title: z.string().trim().max(500).optional(),
   content: z.string().max(2_000_000).optional(),
   appendContent: z.string().max(2_000_000).optional(),
@@ -532,6 +719,7 @@ app.patch(['/api/v1/notes/:id', '/v1/notes/:id'], dataLimiter, authenticate, asy
   try {
     await client.query('BEGIN');
     const version = await lockWorkspace(client, req.user!.id);
+    await setActor(client, actorOf(req), data.message);
     const existingRes = await client.query(
       `SELECT ${NOTE_COLUMNS} FROM notes WHERE id=$1 AND user_id=$2 FOR UPDATE`,
       [req.params.id, req.user!.id],
@@ -600,6 +788,7 @@ app.delete(['/api/v1/notes/:id', '/v1/notes/:id'], dataLimiter, authenticate, as
   try {
     await client.query('BEGIN');
     const version = await lockWorkspace(client, req.user!.id);
+    await setActor(client, actorOf(req), typeof req.query.message === 'string' ? req.query.message.slice(0, 200) : undefined);
     const existingRes = await client.query(
       'SELECT folder_id as "folderId", tag_ids as "tagIds" FROM notes WHERE id=$1 AND user_id=$2 FOR UPDATE',
       [req.params.id, req.user!.id],
@@ -1297,4 +1486,20 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 
 await migrate();
 await ensureAdmin();
+
+// Les versions des notes supprimées sont gardées VERSION_RETENTION_DAYS jours (corbeille), puis purgées.
+async function purgeOldVersions(): Promise<void> {
+  try {
+    const result = await pool.query(
+      `DELETE FROM note_versions v
+       WHERE v.created_at < now() - ($1::int * interval '1 day') AND NOT EXISTS (SELECT 1 FROM notes n WHERE n.id = v.note_id)`,
+      [VERSION_RETENTION_DAYS],
+    );
+    if (result.rowCount) console.log(`[history] ${result.rowCount} version(s) de notes supprimées purgée(s)`);
+  } catch (error) {
+    console.error('[history] purge impossible :', error instanceof Error ? error.message : error);
+  }
+}
+await purgeOldVersions();
+setInterval(() => void purgeOldVersions(), 24 * 60 * 60 * 1000).unref();
 app.listen(PORT, '0.0.0.0', () => console.log(`[api] écoute sur :${PORT}`));
