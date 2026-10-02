@@ -658,6 +658,51 @@ app.post(['/api/v1/folders', '/v1/folders'], dataLimiter, authenticate, async (r
   }
 });
 
+const createTagSchema = z.object({
+  name: z.string().trim().min(1).max(60),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+});
+
+// Les tags sont communs à tout le carnet (pas de périmètre de dossier). La création est
+// idempotente : un nom déjà pris (sans tenir compte de la casse) renvoie le tag existant.
+app.post(['/api/v1/tags', '/v1/tags'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.write) {
+    return res.status(403).json({ error: "Permission d'écriture refusée pour ce jeton" });
+  }
+  const parsed = createTagSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Données de tag invalides', details: parsed.error.issues });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const version = await lockWorkspace(client, req.user!.id);
+    const existing = await client.query(
+      `SELECT id, name, color, created_at as "createdAt" FROM tags WHERE user_id=$1 AND lower(name)=lower($2)`,
+      [req.user!.id, parsed.data.name],
+    );
+    if (existing.rowCount) {
+      await client.query('ROLLBACK');
+      // Un tag interdit à ce jeton n'est ni renvoyé ni confirmé.
+      if (hasDeniedTag(req, [existing.rows[0].id])) return res.status(409).json({ error: 'Nom de tag indisponible' });
+      return res.status(200).json(existing.rows[0]);
+    }
+    const result = await client.query(
+      `INSERT INTO tags (id, user_id, name, color, created_at) VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, name, color, created_at as "createdAt"`,
+      [randomUUID(), req.user!.id, parsed.data.name, parsed.data.color ?? '#64748b', Date.now()],
+    );
+    await publishWorkspace(client, req.user!.id, version);
+    await client.query('COMMIT');
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[tags] erreur création:', err instanceof Error ? err.message : err);
+    res.status(500).json({ error: 'Impossible de créer le tag' });
+  } finally {
+    client.release();
+  }
+});
+
 app.get(['/api/v1/tags', '/v1/tags'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
   if (req.apiToken && !req.apiToken.permissions.read) {
     return res.status(403).json({ error: 'Permission de lecture refusée pour ce jeton' });
@@ -946,6 +991,9 @@ const UUID = z.string().uuid();
  * gestionnaire, respect de ses propres limites. null = acceptée.
  */
 async function checkTokenPolicy(req: AuthRequest, policy: TokenPolicy, newFolderIds: string[]): Promise<{ status: number; error: string } | null> {
+  // Un gestionnaire ne voit pas ses propres tags interdits (ils sont filtrés de /v1/tags) : il ne peut donc
+  // pas les citer. Ils sont repris automatiquement chez l'enfant, qui ne peut jamais en avoir moins.
+  if (req.apiToken) policy.deniedTagIds = [...new Set([...policy.deniedTagIds, ...req.apiToken.deniedTagIds])];
   const invalid = validatePolicy(policy);
   if (invalid) return { status: 400, error: invalid };
   if (newFolderIds.length > 0) {

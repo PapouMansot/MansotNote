@@ -2,7 +2,7 @@
  * Fusion entre l'onglet et le serveur après un conflit de version.
  *
  * Un bot (jeton API) peut créer, modifier ou supprimer des notes, et créer des
- * dossiers, pendant que l'onglet est ouvert. Sans fusion, la sauvegarde
+ * dossiers et des tags, pendant que l'onglet est ouvert. Sans fusion, la sauvegarde
  * suivante de l'onglet renverrait son ancien état et la synchro relationnelle
  * effacerait ce que le bot vient d'écrire. On compare donc, élément par élément,
  * trois versions :
@@ -10,7 +10,7 @@
  *  - local  : l'état de l'onglet ;
  *  - remote : l'état actuel du serveur.
  */
-import type { Folder, Note } from '@/types';
+import type { Folder, Note, Tag } from '@/types';
 
 type WithId = { id: string };
 
@@ -50,6 +50,11 @@ export function mergeNotes(local: Note[], remote: Note[], baseIds: ReadonlySet<s
 
 /** Dossiers : l'organisation de l'onglet (nom, ordre) prime sur celle du serveur. */
 export function mergeFolders(local: Folder[], remote: Folder[], baseIds: ReadonlySet<string>): Folder[] {
+  return mergeById(local, remote, baseIds, (mine) => mine);
+}
+
+/** Tags : comme les dossiers, la version de l'onglet prime (nom, couleur). */
+export function mergeTags(local: Tag[], remote: Tag[], baseIds: ReadonlySet<string>): Tag[] {
   return mergeById(local, remote, baseIds, (mine) => mine);
 }
 

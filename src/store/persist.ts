@@ -65,13 +65,14 @@ export async function persistNow(set: StoreSet, get: StoreGet): Promise<void> {
       // onglet) : on les affiche en gardant les frappes faites pendant l'envoi.
       const notes = rebaseLocalChanges(saved.notes, data.notes, after.data.notes);
       const folders = rebaseLocalChanges(saved.folders, data.folders, after.data.folders);
+      const tags = rebaseLocalChanges(saved.tags, data.tags, after.data.tags);
       const draft = after.ui.noteDraft;
       const openNote = draft?.noteId ? notes.find((n) => n.id === draft.noteId) : undefined;
       const noteDraft = draft && !draft.dirty && openNote
         ? { ...draft, title: openNote.title, content: openNote.content }
         : draft;
       set({
-        data: { ...after.data, notes, folders, savedAt: Date.now() },
+        data: { ...after.data, notes, folders, tags, savedAt: Date.now() },
         ui: { ...after.ui, noteDraft, saveStatus: 'saved', saveError: null },
       });
       return;

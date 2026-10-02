@@ -1,10 +1,11 @@
 import type { PersistedState, StorageAdapter } from '@/types';
-import { detachMissingFolders, mergeFolders, mergeNotes } from '@/lib/workspace-merge';
+import { detachMissingFolders, mergeFolders, mergeNotes, mergeTags } from '@/lib/workspace-merge';
 
 let workspaceVersion = 0;
 /** Ids des notes et dossiers connus lors de la dernière synchro réussie (base de fusion). */
 let baseNoteIds = new Set<string>();
 let baseFolderIds = new Set<string>();
+let baseTagIds = new Set<string>();
 
 const MAX_MERGE_ATTEMPTS = 3;
 
@@ -30,6 +31,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 function rememberBase(state: PersistedState | null): void {
   baseNoteIds = new Set((state?.notes ?? []).map((n) => n.id));
   baseFolderIds = new Set((state?.folders ?? []).map((f) => f.id));
+  baseTagIds = new Set((state?.tags ?? []).map((t) => t.id));
 }
 
 async function fetchWorkspace(): Promise<{ state: PersistedState | null; version: number }> {
@@ -72,6 +74,7 @@ export class RemoteStorageAdapter implements StorageAdapter {
         candidate = {
           ...candidate,
           folders,
+          tags: mergeTags(candidate.tags, server.state?.tags ?? [], baseTagIds),
           notes: detachMissingFolders(mergeNotes(candidate.notes, server.state?.notes ?? [], baseNoteIds), folders),
         };
         rememberBase(server.state);
@@ -85,6 +88,7 @@ export class RemoteStorageAdapter implements StorageAdapter {
     workspaceVersion = 0;
     baseNoteIds = new Set();
     baseFolderIds = new Set();
+    baseTagIds = new Set();
   }
 }
 

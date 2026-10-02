@@ -36,6 +36,8 @@ interface ApiToken {
 /** Réglages d'un jeton, tels qu'ils sont édités dans le formulaire. */
 interface TokenDraft {
   name: string;
+  /** false = tous les dossiers ; true = seulement allowedFolderIds. */
+  limitFolders: boolean;
   write: boolean;
   delete: boolean;
   manage: boolean;
@@ -46,6 +48,7 @@ interface TokenDraft {
 
 const EMPTY_DRAFT: TokenDraft = {
   name: '',
+  limitFolders: false,
   write: true,
   delete: false,
   manage: false,
@@ -57,6 +60,7 @@ const EMPTY_DRAFT: TokenDraft = {
 function draftFromToken(token: ApiToken): TokenDraft {
   return {
     name: token.name,
+    limitFolders: (token.allowedFolderIds ?? []).length > 0,
     write: token.permissions?.write !== false,
     delete: token.permissions?.delete === true,
     manage: token.permissions?.manage === true,
@@ -70,7 +74,7 @@ function policyBody(draft: TokenDraft, withRead: boolean) {
   return {
     name: draft.name.trim(),
     permissions: { ...(withRead ? { read: true } : {}), write: draft.write, delete: draft.delete, manage: draft.manage },
-    allowedFolderIds: draft.allowedFolderIds,
+    allowedFolderIds: draft.limitFolders ? draft.allowedFolderIds : [],
     deniedTagIds: draft.deniedTagIds,
     autoTagId: draft.autoTagId || null,
   };
@@ -129,45 +133,58 @@ function TokenPolicyFields({ draft, onChange, folders, tags, folderLabel }: Fiel
       {draft.manage && (
         <p className="rounded-md bg-amber-50 p-2 text-[11px] text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
           Ce jeton pourra créer, modifier et révoquer des jetons, mais seulement avec des droits égaux ou inférieurs aux siens
-          (mêmes dossiers ou moins, mêmes tags interdits ou plus). Il ne voit que les jetons qu'il a créés. Révoquer ce
-          jeton révoque aussi ceux qu'il a créés.
+          (mêmes dossiers ou moins). Ses tags interdits sont repris automatiquement chez ses jetons, même s'il ne les voit pas.
+          Il ne voit que les jetons qu'il a créés. Révoquer ce jeton révoque aussi ceux qu'il a créés.
         </p>
       )}
 
       <div className="space-y-1.5">
-        <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-600 dark:text-zinc-400">
-          <span>Dossiers accessibles (sous-dossiers inclus) :</span>
-          <span className="font-normal text-zinc-400">
-            {draft.allowedFolderIds.length === 0 ? 'Tous les dossiers' : draft.allowedFolderIds.length + ' dossier(s) restreint(s)'}
-          </span>
+        <div className="text-[11px] font-semibold text-zinc-600 dark:text-zinc-400">Dossiers accessibles</div>
+        <div className="flex flex-col gap-1">
+          <label className="flex cursor-pointer items-center gap-2">
+            <input type="radio" checked={!draft.limitFolders} onChange={() => set({ limitFolders: false })} className="text-indigo-600 focus:ring-indigo-500" />
+            <span className="text-zinc-700 dark:text-zinc-300">Tous les dossiers (notes sans dossier et futurs dossiers compris)</span>
+          </label>
+          <label className="flex cursor-pointer items-center gap-2">
+            <input type="radio" checked={draft.limitFolders} onChange={() => set({ limitFolders: true })} className="text-indigo-600 focus:ring-indigo-500" />
+            <span className="text-zinc-700 dark:text-zinc-300">Seulement certains dossiers</span>
+          </label>
         </div>
-        {folders.length === 0 ? (
-          <p className="text-[11px] italic text-zinc-400">Aucun dossier créé dans le workspace.</p>
-        ) : (
-          <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto">
-            {folders.map((folder) => {
-              const selected = draft.allowedFolderIds.includes(folder.id);
-              return (
-                <button
-                  type="button"
-                  key={folder.id}
-                  onClick={() => set({ allowedFolderIds: toggle(draft.allowedFolderIds, folder.id) })}
-                  className={clsx(chipBase, selected ? 'border-indigo-300 bg-indigo-50 font-medium text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300' : chipOff)}
-                >
-                  <FolderIcon size={11} />
-                  <span>{folderLabel(folder.id)}</span>
-                </button>
-              );
-            })}
-          </div>
+        {draft.limitFolders && (
+          <>
+            {folders.length === 0 ? (
+              <p className="text-[11px] italic text-zinc-400">Aucun dossier créé dans le workspace.</p>
+            ) : (
+              <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto">
+                {folders.map((folder) => {
+                  const selected = draft.allowedFolderIds.includes(folder.id);
+                  return (
+                    <button
+                      type="button"
+                      key={folder.id}
+                      onClick={() => set({ allowedFolderIds: toggle(draft.allowedFolderIds, folder.id) })}
+                      className={clsx(chipBase, selected ? 'border-indigo-300 bg-indigo-50 font-medium text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300' : chipOff)}
+                    >
+                      <FolderIcon size={11} />
+                      <span>{folderLabel(folder.id)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <p className="text-[11px] text-zinc-500">Les sous-dossiers sont inclus. Avec cette limite, les notes sans dossier ne sont pas visibles.</p>
+            {draft.allowedFolderIds.length === 0 && (
+              <p className="text-[11px] text-red-600 dark:text-red-400">Choisissez au moins un dossier.</p>
+            )}
+          </>
         )}
       </div>
 
       <div className="space-y-1.5">
         <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-600 dark:text-zinc-400">
-          <span>Tags interdits (notes masquées au bot) :</span>
+          <span>Tags à masquer au bot (laisser vide pour tout autoriser) :</span>
           <span className="font-normal text-zinc-400">
-            {draft.deniedTagIds.length === 0 ? 'Aucun tag exclu' : draft.deniedTagIds.length + ' tag(s) exclu(s)'}
+            {draft.deniedTagIds.length === 0 ? 'Aucun : tous les tags sont visibles' : draft.deniedTagIds.length + ' tag(s) masqué(s)'}
           </span>
         </div>
         {tags.length === 0 ? (
@@ -184,11 +201,17 @@ function TokenPolicyFields({ draft, onChange, folders, tags, folderLabel }: Fiel
                   className={clsx(chipBase, denied ? 'border-red-300 bg-red-50 font-medium text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300' : chipOff)}
                 >
                   <TagIcon size={11} />
-                  <span>#{tag.name}</span>
+                  <span>{denied ? '⛔ ' : ''}#{tag.name}</span>
                 </button>
               );
             })}
           </div>
+        )}
+        <p className="text-[11px] text-zinc-500">Un tag rouge est invisible pour le bot, ainsi que toutes les notes qui le portent. Ne cochez que ce qu'il ne doit pas voir.</p>
+        {tags.length > 0 && draft.deniedTagIds.length >= tags.length && (
+          <p className="rounded-md bg-red-50 p-2 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300">
+            ⚠️ Tous les tags sont masqués : le bot ne verra aucun tag ni aucune note qui en porte un.
+          </p>
         )}
       </div>
 
@@ -387,7 +410,7 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
                 type="submit"
                 size="sm"
                 variant="primary"
-                disabled={!newDraft.name.trim() || tokenLoading}
+                disabled={!newDraft.name.trim() || tokenLoading || (newDraft.limitFolders && newDraft.allowedFolderIds.length === 0)}
                 icon={tokenLoading && editingId === null ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
               >
                 Créer
@@ -525,7 +548,7 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
                               size="sm"
                               variant="primary"
                               onClick={saveEdit}
-                              disabled={!editDraft.name.trim() || tokenLoading}
+                              disabled={!editDraft.name.trim() || tokenLoading || (editDraft.limitFolders && editDraft.allowedFolderIds.length === 0)}
                               icon={tokenLoading ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
                             >
                               Enregistrer
