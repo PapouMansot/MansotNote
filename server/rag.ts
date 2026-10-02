@@ -87,22 +87,48 @@ export async function indexWorkspace(client: PoolClient, userId: string, state: 
   }
 }
 
-export async function hybridSearch(userId: string, query: string, limit = 6) {
+export interface SearchFilters {
+  /** null/absent = tous les dossiers ; [] = aucun dossier accessible. */
+  folderScope?: string[] | null;
+  deniedTagIds?: string[] | null;
+}
+
+export async function hybridSearch(userId: string, query: string, limit = 6, filters?: SearchFilters) {
   const [queryVector] = await embeddings([query]);
+
+  const allowedFolders = filters?.folderScope ?? null;
+  const deniedTags = filters?.deniedTagIds?.length ? filters.deniedTagIds : null;
+
   const result = await pool.query(
     `WITH semantic AS (
-       SELECT id,row_number() OVER(ORDER BY embedding <=> $2::vector) rank FROM note_chunks WHERE user_id=$1 AND embedding IS NOT NULL LIMIT 30
+       SELECT c.id, row_number() OVER(ORDER BY c.embedding <=> $2::vector) rank
+       FROM note_chunks c
+       JOIN notes n ON n.id = c.note_id AND n.user_id = c.user_id
+       WHERE c.user_id = $1 AND c.embedding IS NOT NULL
+         AND ($5::text[] IS NULL OR n.folder_id = ANY($5::text[]))
+         AND ($6::text[] IS NULL OR NOT (n.tag_ids ?| $6::text[]))
+       LIMIT 30
      ), lexical AS (
-       SELECT id,row_number() OVER(ORDER BY ts_rank_cd(to_tsvector('simple',note_title||' '||heading||' '||content),plainto_tsquery('simple',$3)) DESC) rank
-       FROM note_chunks WHERE user_id=$1 AND to_tsvector('simple',note_title||' '||heading||' '||content) @@ plainto_tsquery('simple',$3) LIMIT 30
+       SELECT c.id, row_number() OVER(ORDER BY ts_rank_cd(to_tsvector('simple', c.note_title||' '||c.heading||' '||c.content), plainto_tsquery('simple', $3)) DESC) rank
+       FROM note_chunks c
+       JOIN notes n ON n.id = c.note_id AND n.user_id = c.user_id
+       WHERE c.user_id = $1
+         AND to_tsvector('simple', c.note_title||' '||c.heading||' '||c.content) @@ plainto_tsquery('simple', $3)
+         AND ($5::text[] IS NULL OR n.folder_id = ANY($5::text[]))
+         AND ($6::text[] IS NULL OR NOT (n.tag_ids ?| $6::text[]))
+       LIMIT 30
      ), scores AS (
-       SELECT id,sum(score) score FROM (
-         SELECT id,1.0/(60+rank) score FROM semantic UNION ALL SELECT id,1.15/(60+rank) score FROM lexical
+       SELECT id, sum(score) score FROM (
+         SELECT id, 1.0/(60+rank) score FROM semantic UNION ALL SELECT id, 1.15/(60+rank) score FROM lexical
        ) x GROUP BY id
      )
-     SELECT n.note_id,n.note_title,n.heading,n.content,n.metadata,s.score FROM scores s JOIN note_chunks n ON n.id=s.id
-     ORDER BY s.score DESC LIMIT $4`,
-    [userId, `[${queryVector.join(',')}]`, query, limit],
+     SELECT n.note_id, n.note_title, n.heading, n.content, n.metadata, s.score
+     FROM scores s
+     JOIN note_chunks n ON n.id = s.id
+     ORDER BY s.score DESC
+     LIMIT $4`,
+    [userId, `[${queryVector.join(',')}]`, query, limit, allowedFolders, deniedTags],
   );
   return result.rows;
 }
+

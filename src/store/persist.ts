@@ -17,6 +17,7 @@
  */
 import { createDebouncer } from '@/lib/debounce';
 import { isAppLocked } from '@/storage/auth-manager';
+import { rebaseLocalChanges } from '@/lib/workspace-merge';
 import type { StoreGet, StoreSet } from './types';
 
 const debouncer = createDebouncer();
@@ -57,8 +58,24 @@ export async function persistNow(set: StoreSet, get: StoreGet): Promise<void> {
   const { storage, data, ui } = get();
   set({ ui: { ...ui, saveStatus: 'saving', saveError: null } });
   try {
-    await storage.save(data);
+    const saved = await storage.save(data);
     const after = get();
+    if (saved) {
+      // Le backend a fusionné des écritures faites ailleurs (bot, autre
+      // onglet) : on les affiche en gardant les frappes faites pendant l'envoi.
+      const notes = rebaseLocalChanges(saved.notes, data.notes, after.data.notes);
+      const folders = rebaseLocalChanges(saved.folders, data.folders, after.data.folders);
+      const draft = after.ui.noteDraft;
+      const openNote = draft?.noteId ? notes.find((n) => n.id === draft.noteId) : undefined;
+      const noteDraft = draft && !draft.dirty && openNote
+        ? { ...draft, title: openNote.title, content: openNote.content }
+        : draft;
+      set({
+        data: { ...after.data, notes, folders, savedAt: Date.now() },
+        ui: { ...after.ui, noteDraft, saveStatus: 'saved', saveError: null },
+      });
+      return;
+    }
     set({
       data: { ...after.data, savedAt: Date.now() },
       ui: { ...after.ui, saveStatus: 'saved', saveError: null },

@@ -18,7 +18,7 @@ export interface DbNote {
  * Cela permet à toute modification faite dans Supabase Studio (Table Editor)
  * d'être immédiatement visible dans l'application MansotNote.
  */
-export async function assembleWorkspaceFromDb(pool: Pool, userId: string) {
+export async function assembleWorkspaceFromDb(pool: Pool | PoolClient, userId: string) {
   const wsResult = await pool.query(
     'SELECT state, version, updated_at FROM workspaces WHERE user_id=$1',
     [userId]

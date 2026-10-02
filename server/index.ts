@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import type { PoolClient } from 'pg';
 import cookieParser from 'cookie-parser';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import helmet from 'helmet';
@@ -8,6 +9,14 @@ import { pool, assertDatabase } from './db.js';
 import { migrate } from './migrate.js';
 import { hybridSearch, indexWorkspace } from './rag.js';
 import { assembleWorkspaceFromDb, syncWorkspaceToRelational } from './relational-sync.js';
+import {
+  MAX_CHILD_TOKENS,
+  normalizePermissions,
+  validateChildPolicy,
+  validatePolicy,
+  type TokenPermissions,
+  type TokenPolicy,
+} from './token-policy.js';
 import {
   createSessionToken,
   hashPassword,
@@ -49,11 +58,69 @@ const workspaceSchema = z.object({
   expectedVersion: z.number().int().nonnegative().optional(),
 });
 
+export interface ApiTokenData {
+  id: string;
+  name: string;
+  permissions: TokenPermissions;
+  allowedFolderIds: string[];
+  deniedTagIds: string[];
+  autoTagId: string | null;
+  /**
+   * Dossiers réellement accessibles (dossiers autorisés + sous-dossiers),
+   * résolus à chaque requête. null = aucune restriction ; [] = aucun dossier
+   * accessible (dossier autorisé supprimé) : le jeton ne voit alors rien.
+   */
+  folderScope: string[] | null;
+}
+
 type AuthRequest = Request & {
   user?: { id: string; username: string };
   sessionToken?: string;
   authMethod?: 'session' | 'api_token';
+  apiToken?: ApiTokenData;
 };
+
+/** Dossiers autorisés + tous leurs sous-dossiers existants. */
+async function resolveFolderScope(userId: string, rootIds: string[]): Promise<string[]> {
+  const result = await pool.query(
+    `WITH RECURSIVE tree AS (
+       SELECT id FROM folders WHERE user_id=$1 AND id = ANY($2::text[])
+       UNION
+       SELECT f.id FROM folders f JOIN tree t ON f.parent_id = t.id WHERE f.user_id=$1
+     )
+     SELECT id FROM tree`,
+    [userId, rootIds],
+  );
+  return result.rows.map((r) => String(r.id));
+}
+
+/** Périmètre de dossiers du jeton : null = sans restriction (session ou jeton global). */
+function folderScopeOf(req: AuthRequest): string[] | null {
+  return req.apiToken?.folderScope ?? null;
+}
+
+function deniedTagsOf(req: AuthRequest): string[] | null {
+  const denied = req.apiToken?.deniedTagIds;
+  return denied && denied.length > 0 ? denied : null;
+}
+
+function inFolderScope(req: AuthRequest, folderId: string | null | undefined): boolean {
+  const scope = folderScopeOf(req);
+  return scope === null || (typeof folderId === 'string' && scope.includes(folderId));
+}
+
+function hasDeniedTag(req: AuthRequest, tagIds: unknown): boolean {
+  const denied = deniedTagsOf(req);
+  if (!denied) return false;
+  return Array.isArray(tagIds) && tagIds.some((t) => denied.includes(String(t)));
+}
+
+/** Routes réservées à l'application web : un jeton de bot n'y a jamais accès. */
+function requireSession(req: AuthRequest, res: Response): boolean {
+  if (req.authMethod === 'session') return true;
+  res.status(403).json({ error: 'Session navigateur requise' });
+  return false;
+}
 
 async function authenticate(req: AuthRequest, res: Response, next: NextFunction) {
   // 1. Vérification Bearer Token (Extension Web Clipper, Webhooks, CLI)
@@ -63,7 +130,10 @@ async function authenticate(req: AuthRequest, res: Response, next: NextFunction)
     if (bearerToken.length >= 20) {
       const tokenHash = hashSessionToken(bearerToken);
       const tokenResult = await pool.query(
-        `SELECT u.id, u.username, t.id as token_id
+        `SELECT u.id, u.username, t.id as token_id, t.name, t.permissions,
+                t.allowed_folder_ids as "allowedFolderIds",
+                t.denied_tag_ids as "deniedTagIds",
+                t.auto_tag_id as "autoTagId"
          FROM api_tokens t
          JOIN users u ON u.id = t.user_id
          WHERE t.token_hash = $1
@@ -73,10 +143,23 @@ async function authenticate(req: AuthRequest, res: Response, next: NextFunction)
       );
 
       if (tokenResult.rowCount) {
-        req.user = { id: tokenResult.rows[0].id, username: tokenResult.rows[0].username };
+        const row = tokenResult.rows[0];
+        req.user = { id: row.id, username: row.username };
         req.authMethod = 'api_token';
+        req.apiToken = {
+          id: row.token_id,
+          name: row.name,
+          permissions: normalizePermissions(row.permissions),
+          allowedFolderIds: Array.isArray(row.allowedFolderIds) ? row.allowedFolderIds : [],
+          deniedTagIds: Array.isArray(row.deniedTagIds) ? row.deniedTagIds : [],
+          autoTagId: typeof row.autoTagId === 'string' ? row.autoTagId : null,
+          folderScope: null,
+        };
+        if (req.apiToken.allowedFolderIds.length > 0) {
+          req.apiToken.folderScope = await resolveFolderScope(row.id, req.apiToken.allowedFolderIds);
+        }
         // Met à jour la date de dernière utilisation en arrière-plan
-        void pool.query('UPDATE api_tokens SET last_used_at=now() WHERE id=$1', [tokenResult.rows[0].token_id]);
+        void pool.query('UPDATE api_tokens SET last_used_at=now() WHERE id=$1', [row.token_id]);
         return next();
       }
     }
@@ -222,6 +305,9 @@ app.post('/auth/change-password', authenticate, loginLimiter, async (req: AuthRe
 });
 
 app.get('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  // L'état complet contient toutes les notes et les réglages (clé IA) :
+  // jamais accessible à un jeton, qui passe par l'API filtrée /api/v1/notes.
+  if (!requireSession(req, res)) return;
   const relationalResult = await assembleWorkspaceFromDb(pool, req.user!.id);
   if (relationalResult) {
     return res.json(relationalResult);
@@ -232,6 +318,7 @@ app.get('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) =
 });
 
 app.put('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (!requireSession(req, res)) return;
   const parsed = workspaceSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Workspace invalide' });
   const { state, expectedVersion } = parsed.data;
@@ -268,21 +355,321 @@ app.put('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) =
 // ==========================================
 // API REST individuelle pour les Notes (Supabase)
 // ==========================================
-app.get(['/api/v1/notes', '/v1/notes'], authenticate, async (req: AuthRequest, res) => {
+// Une note est visible par un jeton si elle est dans son périmètre de dossiers
+// et ne porte aucun tag interdit. Sinon : 404, pour ne pas révéler qu'elle existe.
+const NOTE_COLUMNS = 'id, folder_id as "folderId", title, content, tag_ids as "tagIds", pinned, archived, archived_at as "archivedAt", created_at as "createdAt", updated_at as "updatedAt"';
+
+app.get(['/api/v1/notes', '/v1/notes'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.read) {
+    return res.status(403).json({ error: 'Permission de lecture refusée pour ce jeton' });
+  }
   const notes = await pool.query(
-    'SELECT id, folder_id as "folderId", title, content, tag_ids as "tagIds", pinned, archived, archived_at as "archivedAt", created_at as "createdAt", updated_at as "updatedAt" FROM notes WHERE user_id=$1 ORDER BY updated_at DESC',
-    [req.user!.id]
+    `SELECT ${NOTE_COLUMNS}
+     FROM notes
+     WHERE user_id=$1
+       AND ($2::text[] IS NULL OR folder_id = ANY($2::text[]))
+       AND ($3::text[] IS NULL OR NOT (tag_ids ?| $3::text[]))
+     ORDER BY updated_at DESC`,
+    [req.user!.id, folderScopeOf(req), deniedTagsOf(req)],
   );
   res.json(notes.rows);
 });
 
-app.get(['/api/v1/notes/:id', '/v1/notes/:id'], authenticate, async (req: AuthRequest, res) => {
+app.get(['/api/v1/notes/:id', '/v1/notes/:id'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.read) {
+    return res.status(403).json({ error: 'Permission de lecture refusée pour ce jeton' });
+  }
   const note = await pool.query(
-    'SELECT id, folder_id as "folderId", title, content, tag_ids as "tagIds", pinned, archived, archived_at as "archivedAt", created_at as "createdAt", updated_at as "updatedAt" FROM notes WHERE user_id=$1 AND id=$2',
-    [req.user!.id, req.params.id]
+    `SELECT ${NOTE_COLUMNS}
+     FROM notes
+     WHERE user_id=$1 AND id=$2
+       AND ($3::text[] IS NULL OR folder_id = ANY($3::text[]))
+       AND ($4::text[] IS NULL OR NOT (tag_ids ?| $4::text[]))`,
+    [req.user!.id, req.params.id, folderScopeOf(req), deniedTagsOf(req)],
   );
   if (!note.rowCount) return res.status(404).json({ error: 'Note introuvable' });
   res.json(note.rows[0]);
+});
+
+/**
+ * Verrouille la ligne workspace AVANT de toucher aux notes. PUT /workspace
+ * prend les verrous dans le même ordre (workspace puis notes) : aucun
+ * interblocage possible entre un bot et l'onglet ouvert.
+ */
+async function lockWorkspace(client: PoolClient, userId: string): Promise<number> {
+  const result = await client.query('SELECT version FROM workspaces WHERE user_id=$1 FOR UPDATE', [userId]);
+  return result.rowCount ? Number(result.rows[0].version) : 0;
+}
+
+/**
+ * Reconstruit l'état JSON depuis les tables et incrémente la version. Le
+ * navigateur recevra un 409 à sa prochaine sauvegarde et fusionnera.
+ */
+async function publishWorkspace(client: PoolClient, userId: string, version: number) {
+  const assembled = await assembleWorkspaceFromDb(client, userId);
+  if (!assembled) return null;
+  const nextVersion = version + 1;
+  await client.query(
+    'UPDATE workspaces SET state=$2, version=$3, updated_at=now() WHERE user_id=$1',
+    [userId, assembled.state, nextVersion],
+  );
+  return { state: assembled.state, version: nextVersion };
+}
+
+const createNoteSchema = z.object({
+  title: z.string().trim().max(500).optional(),
+  content: z.string().max(2_000_000).default(''),
+  folderId: z.string().nullable().optional(),
+  tagIds: z.array(z.string()).max(50).optional(),
+  pinned: z.boolean().optional().default(false),
+});
+
+app.post(['/api/v1/notes', '/v1/notes'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.write) {
+    return res.status(403).json({ error: "Permission d'écriture refusée pour ce jeton" });
+  }
+  const parsed = createNoteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Données de note invalides', details: parsed.error.issues });
+  }
+  let folderId = parsed.data.folderId ?? null;
+  const tagIds = [...new Set(parsed.data.tagIds ?? [])];
+  if (req.apiToken) {
+    const scope = folderScopeOf(req);
+    if (scope !== null && folderId === null) {
+      // Dossier par défaut : le premier dossier configuré qui existe encore.
+      folderId = req.apiToken.allowedFolderIds.find((id) => scope.includes(id)) ?? null;
+    }
+    if (!inFolderScope(req, folderId)) {
+      return res.status(403).json({ error: "Ce jeton n'est pas autorisé à écrire dans ce dossier" });
+    }
+    if (req.apiToken.autoTagId && !tagIds.includes(req.apiToken.autoTagId)) {
+      tagIds.push(req.apiToken.autoTagId);
+    }
+    if (hasDeniedTag(req, tagIds)) {
+      return res.status(403).json({ error: 'Ce jeton ne peut pas utiliser un tag interdit' });
+    }
+  }
+
+  const now = Date.now();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const version = await lockWorkspace(client, req.user!.id);
+    const result = await client.query(
+      `INSERT INTO notes (id, user_id, folder_id, title, content, tag_ids, pinned, archived, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, false, $8, $8)
+       RETURNING ${NOTE_COLUMNS}`,
+      [randomUUID(), req.user!.id, folderId, parsed.data.title || 'Sans titre', parsed.data.content, JSON.stringify(tagIds), parsed.data.pinned, now],
+    );
+    const published = await publishWorkspace(client, req.user!.id, version);
+    await client.query('COMMIT');
+    // Après le COMMIT : l'indexation lit la version depuis une autre connexion.
+    if (published) enqueueWorkspaceIndex(req.user!.id, published.state, published.version);
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[notes] erreur création:', err instanceof Error ? err.message : err);
+    res.status(500).json({ error: 'Impossible de créer la note' });
+  } finally {
+    client.release();
+  }
+});
+
+const updateNoteSchema = z.object({
+  title: z.string().trim().max(500).optional(),
+  content: z.string().max(2_000_000).optional(),
+  appendContent: z.string().max(2_000_000).optional(),
+  folderId: z.string().nullable().optional(),
+  tagIds: z.array(z.string()).max(50).optional(),
+  pinned: z.boolean().optional(),
+  archived: z.boolean().optional(),
+}).refine((d) => d.content === undefined || d.appendContent === undefined, {
+  message: 'content et appendContent ne peuvent pas être envoyés ensemble',
+});
+
+app.patch(['/api/v1/notes/:id', '/v1/notes/:id'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.write) {
+    return res.status(403).json({ error: "Permission d'écriture refusée pour ce jeton" });
+  }
+  const parsed = updateNoteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Données invalides', details: parsed.error.issues });
+  }
+  const data = parsed.data;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const version = await lockWorkspace(client, req.user!.id);
+    const existingRes = await client.query(
+      `SELECT ${NOTE_COLUMNS} FROM notes WHERE id=$1 AND user_id=$2 FOR UPDATE`,
+      [req.params.id, req.user!.id],
+    );
+    const note = existingRes.rows[0];
+    if (!note || (req.apiToken && (!inFolderScope(req, note.folderId) || hasDeniedTag(req, note.tagIds)))) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Note introuvable' });
+    }
+
+    const newFolderId = data.folderId !== undefined ? data.folderId : note.folderId;
+    const newTagIds: string[] = data.tagIds !== undefined
+      ? [...new Set(data.tagIds)]
+      : (Array.isArray(note.tagIds) ? [...note.tagIds] : []);
+    if (req.apiToken) {
+      // Couvre aussi folderId: null, qui sortirait la note du périmètre du bot.
+      if (!inFolderScope(req, newFolderId)) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Déplacement vers un dossier interdit pour ce jeton' });
+      }
+      if (req.apiToken.autoTagId && !newTagIds.includes(req.apiToken.autoTagId)) {
+        newTagIds.push(req.apiToken.autoTagId);
+      }
+      if (hasDeniedTag(req, newTagIds)) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Ce jeton ne peut pas utiliser un tag interdit' });
+      }
+    }
+
+    let newContent: string = note.content;
+    if (data.appendContent !== undefined) {
+      newContent = newContent ? `${newContent}\n\n${data.appendContent}` : data.appendContent;
+    } else if (data.content !== undefined) {
+      newContent = data.content;
+    }
+    const now = Date.now();
+    const newArchived = data.archived ?? Boolean(note.archived);
+    const newArchivedAt = newArchived ? (note.archived ? note.archivedAt : now) : null;
+
+    const updateRes = await client.query(
+      `UPDATE notes
+       SET title=$1, content=$2, folder_id=$3, tag_ids=$4::jsonb, pinned=$5, archived=$6, archived_at=$7, updated_at=$8
+       WHERE id=$9 AND user_id=$10
+       RETURNING ${NOTE_COLUMNS}`,
+      [data.title ?? note.title, newContent, newFolderId, JSON.stringify(newTagIds), data.pinned ?? Boolean(note.pinned),
+        newArchived, newArchivedAt, now, req.params.id, req.user!.id],
+    );
+    const published = await publishWorkspace(client, req.user!.id, version);
+    await client.query('COMMIT');
+    if (published) enqueueWorkspaceIndex(req.user!.id, published.state, published.version);
+    res.json(updateRes.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[notes] erreur modification:', err instanceof Error ? err.message : err);
+    res.status(500).json({ error: 'Impossible de modifier la note' });
+  } finally {
+    client.release();
+  }
+});
+
+app.delete(['/api/v1/notes/:id', '/v1/notes/:id'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.delete) {
+    return res.status(403).json({ error: 'Permission de suppression refusée pour ce jeton' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const version = await lockWorkspace(client, req.user!.id);
+    const existingRes = await client.query(
+      'SELECT folder_id as "folderId", tag_ids as "tagIds" FROM notes WHERE id=$1 AND user_id=$2 FOR UPDATE',
+      [req.params.id, req.user!.id],
+    );
+    const note = existingRes.rows[0];
+    if (!note || (req.apiToken && (!inFolderScope(req, note.folderId) || hasDeniedTag(req, note.tagIds)))) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Note introuvable' });
+    }
+    await client.query('DELETE FROM notes WHERE id=$1 AND user_id=$2', [req.params.id, req.user!.id]);
+    await client.query('DELETE FROM note_chunks WHERE note_id=$1 AND user_id=$2', [req.params.id, req.user!.id]);
+    await publishWorkspace(client, req.user!.id, version);
+    await client.query('COMMIT');
+    res.status(204).end();
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[notes] erreur suppression:', err instanceof Error ? err.message : err);
+    res.status(500).json({ error: 'Impossible de supprimer la note' });
+  } finally {
+    client.release();
+  }
+});
+
+app.get(['/api/v1/folders', '/v1/folders'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.read) {
+    return res.status(403).json({ error: 'Permission de lecture refusée pour ce jeton' });
+  }
+  const folders = await pool.query(
+    `SELECT id, name, parent_id as "parentId", order_index as "order", created_at as "createdAt"
+     FROM folders
+     WHERE user_id=$1 AND ($2::text[] IS NULL OR id = ANY($2::text[]))
+     ORDER BY order_index ASC`,
+    [req.user!.id, folderScopeOf(req)],
+  );
+  res.json(folders.rows);
+});
+
+const createFolderSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  parentId: z.string().max(200).nullable().optional(),
+});
+
+app.post(['/api/v1/folders', '/v1/folders'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.write) {
+    return res.status(403).json({ error: "Permission d'écriture refusée pour ce jeton" });
+  }
+  const parsed = createFolderSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Données de dossier invalides', details: parsed.error.issues });
+
+  let parentId = parsed.data.parentId ?? null;
+  const scope = folderScopeOf(req);
+  if (scope !== null) {
+    if (parentId === null) parentId = req.apiToken!.allowedFolderIds.find((id) => scope.includes(id)) ?? null;
+    if (!inFolderScope(req, parentId)) {
+      return res.status(403).json({ error: 'Ce jeton ne peut créer un dossier que dans son périmètre' });
+    }
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const version = await lockWorkspace(client, req.user!.id);
+    if (parentId !== null) {
+      const parent = await client.query('SELECT 1 FROM folders WHERE id=$1 AND user_id=$2', [parentId, req.user!.id]);
+      if (!parent.rowCount) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Dossier parent introuvable' });
+      }
+    }
+    // Un sous-dossier d'un dossier du périmètre est automatiquement dans le périmètre.
+    const result = await client.query(
+      `INSERT INTO folders (id, user_id, name, parent_id, order_index, created_at)
+       VALUES ($1, $2, $3, $4::text,
+               COALESCE((SELECT MAX(order_index) + 1 FROM folders WHERE user_id=$2 AND parent_id IS NOT DISTINCT FROM $4::text), 0), $5)
+       RETURNING id, name, parent_id as "parentId", order_index as "order", created_at as "createdAt"`,
+      [randomUUID(), req.user!.id, parsed.data.name, parentId, Date.now()],
+    );
+    await publishWorkspace(client, req.user!.id, version);
+    await client.query('COMMIT');
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[folders] erreur création:', err instanceof Error ? err.message : err);
+    res.status(500).json({ error: 'Impossible de créer le dossier' });
+  } finally {
+    client.release();
+  }
+});
+
+app.get(['/api/v1/tags', '/v1/tags'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.read) {
+    return res.status(403).json({ error: 'Permission de lecture refusée pour ce jeton' });
+  }
+  const tags = await pool.query(
+    `SELECT id, name, color, created_at as "createdAt"
+     FROM tags
+     WHERE user_id=$1 AND ($2::text[] IS NULL OR NOT (id = ANY($2::text[])))
+     ORDER BY name ASC`,
+    [req.user!.id, deniedTagsOf(req)],
+  );
+  res.json(tags.rows);
 });
 
 // ==========================================
@@ -298,6 +685,9 @@ const mediaUploadSchema = z.object({
 });
 
 app.post(['/api/v1/media/upload', '/v1/media/upload'], authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.write) {
+    return res.status(403).json({ error: "Permission d'écriture refusée pour ce jeton" });
+  }
   const parsed = mediaUploadSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Données d'image invalides", details: parsed.error.issues });
@@ -520,41 +910,172 @@ app.post(['/api/v1/ai/embeddings', '/v1/ai/embeddings'], ragLimiter, authenticat
 app.get(['/api/v1/ai/models', '/v1/ai/models'], dataLimiter, authenticate, (_req: AuthRequest, res) => {
   res.json({ data: [...ALLOWED_AI_MODELS].map((id) => ({ id, object: 'model' })) });
 });
+// ==========================================
+// Gestion des jetons : session navigateur, ou jeton « gestionnaire »
+// (permissions.manage) qui n'agit que sur les jetons qu'il a créés lui-même.
+// ==========================================
+function canManageTokens(req: AuthRequest, res: Response): boolean {
+  if (req.authMethod === 'session' || req.apiToken?.permissions.manage) return true;
+  res.status(403).json({ error: 'Session navigateur ou jeton gestionnaire requis' });
+  return false;
+}
+
+const TOKEN_SELECT = `SELECT t.id, t.name, t.permissions,
+       t.allowed_folder_ids as "allowedFolderIds",
+       t.denied_tag_ids as "deniedTagIds",
+       t.auto_tag_id as "autoTagId",
+       t.created_by_token_id as "createdByTokenId",
+       p.name as "createdByName",
+       t.created_at, t.last_used_at, t.expires_at
+  FROM api_tokens t
+  LEFT JOIN api_tokens p ON p.id = t.created_by_token_id`;
+
+function presentToken(row: Record<string, unknown>) {
+  return { ...row, permissions: normalizePermissions(row.permissions) };
+}
+
+/** Identifiant du gestionnaire qui agit, null pour une session (qui voit tous les jetons). */
+function managerIdOf(req: AuthRequest): string | null {
+  return req.apiToken?.id ?? null;
+}
+
+const UUID = z.string().uuid();
+
+/**
+ * Valide une politique de jeton : cohérence, dossiers existants, et, pour un
+ * gestionnaire, respect de ses propres limites. null = acceptée.
+ */
+async function checkTokenPolicy(req: AuthRequest, policy: TokenPolicy, newFolderIds: string[]): Promise<{ status: number; error: string } | null> {
+  const invalid = validatePolicy(policy);
+  if (invalid) return { status: 400, error: invalid };
+  if (newFolderIds.length > 0) {
+    const found = await pool.query('SELECT id FROM folders WHERE user_id=$1 AND id = ANY($2::text[])', [req.user!.id, newFolderIds]);
+    if (found.rowCount !== new Set(newFolderIds).size) return { status: 400, error: 'Dossier inconnu' };
+  }
+  if (req.apiToken) {
+    const limit = validateChildPolicy(
+      { permissions: req.apiToken.permissions, folderScope: req.apiToken.folderScope, deniedTagIds: req.apiToken.deniedTagIds },
+      policy,
+    );
+    if (limit) return { status: 403, error: limit };
+  }
+  return null;
+}
+
 app.get(['/api/tokens', '/tokens'], authenticate, async (req: AuthRequest, res) => {
-  if (req.authMethod !== 'session') return res.status(403).json({ error: 'Session navigateur requise' });
+  if (!canManageTokens(req, res)) return;
   const result = await pool.query(
-    'SELECT id, name, created_at, last_used_at, expires_at FROM api_tokens WHERE user_id=$1 ORDER BY created_at DESC',
-    [req.user!.id],
+    `${TOKEN_SELECT}
+     WHERE t.user_id=$1 AND ($2::uuid IS NULL OR t.created_by_token_id = $2::uuid)
+     ORDER BY t.created_at DESC`,
+    [req.user!.id, managerIdOf(req)],
   );
-  res.json({ tokens: result.rows });
+  res.json({ tokens: result.rows.map(presentToken) });
+});
+
+const permissionsInput = z.object({
+  read: z.boolean(), write: z.boolean(), delete: z.boolean(), manage: z.boolean(),
+}).partial();
+
+const createTokenSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  permissions: permissionsInput.optional(),
+  allowedFolderIds: z.array(z.string().max(200)).max(100).optional().default([]),
+  deniedTagIds: z.array(z.string().max(200)).max(100).optional().default([]),
+  autoTagId: z.string().max(200).nullable().optional(),
 });
 
 app.post(['/api/tokens', '/tokens'], authenticate, async (req: AuthRequest, res) => {
-  if (req.authMethod !== 'session') return res.status(403).json({ error: 'Session navigateur requise' });
-  const parsed = z.object({
-    name: z.string().trim().min(1).max(80),
-  }).safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Nom du jeton invalide' });
+  if (!canManageTokens(req, res)) return;
+  const parsed = createTokenSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Données de jeton invalides', details: parsed.error.issues });
+
+  const policy: TokenPolicy = {
+    permissions: normalizePermissions({ read: true, write: true, delete: false, manage: false, ...parsed.data.permissions }),
+    allowedFolderIds: [...new Set(parsed.data.allowedFolderIds)],
+    deniedTagIds: [...new Set(parsed.data.deniedTagIds)],
+    autoTagId: parsed.data.autoTagId || null,
+  };
+  const problem = await checkTokenPolicy(req, policy, policy.allowedFolderIds);
+  if (problem) return res.status(problem.status).json({ error: problem.error });
+
+  const managerId = managerIdOf(req);
+  if (managerId) {
+    const count = await pool.query('SELECT count(*)::int AS n FROM api_tokens WHERE created_by_token_id=$1', [managerId]);
+    if (count.rows[0].n >= MAX_CHILD_TOKENS) {
+      return res.status(403).json({ error: `Limite de ${MAX_CHILD_TOKENS} jetons créés par ce jeton atteinte` });
+    }
+  }
 
   const rawToken = `mn_${createSessionToken()}`;
-  const tokenHash = hashSessionToken(rawToken);
-
-  const result = await pool.query(
-    `INSERT INTO api_tokens(user_id, token_hash, name)
-     VALUES($1, $2, $3)
-     RETURNING id, name, created_at`,
-    [req.user!.id, tokenHash, parsed.data.name],
+  const inserted = await pool.query(
+    `INSERT INTO api_tokens(user_id, token_hash, name, permissions, allowed_folder_ids, denied_tag_ids, auto_tag_id, created_by_token_id)
+     VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8)
+     RETURNING id`,
+    [req.user!.id, hashSessionToken(rawToken), parsed.data.name, JSON.stringify(policy.permissions),
+      JSON.stringify(policy.allowedFolderIds), JSON.stringify(policy.deniedTagIds), policy.autoTagId, managerId],
   );
+  const record = await pool.query(`${TOKEN_SELECT} WHERE t.id=$1`, [inserted.rows[0].id]);
 
   res.status(201).json({
     token: rawToken, // Unique affichage du jeton en clair
-    record: result.rows[0],
+    record: presentToken(record.rows[0]),
   });
 });
 
+const updateTokenSchema = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  permissions: permissionsInput.optional(),
+  allowedFolderIds: z.array(z.string().max(200)).max(100).optional(),
+  deniedTagIds: z.array(z.string().max(200)).max(100).optional(),
+  autoTagId: z.string().max(200).nullable().optional(),
+});
+
+app.patch(['/api/tokens/:id', '/tokens/:id'], authenticate, async (req: AuthRequest, res) => {
+  if (!canManageTokens(req, res)) return;
+  if (!UUID.safeParse(req.params.id).success) return res.status(404).json({ error: 'Jeton introuvable' });
+  const parsed = updateTokenSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Données de mise à jour invalides' });
+  const data = parsed.data;
+
+  const existing = await pool.query(
+    `SELECT name, permissions, allowed_folder_ids, denied_tag_ids, auto_tag_id
+     FROM api_tokens
+     WHERE id=$1 AND user_id=$2 AND ($3::uuid IS NULL OR created_by_token_id = $3::uuid)`,
+    [req.params.id, req.user!.id, managerIdOf(req)],
+  );
+  if (!existing.rowCount) return res.status(404).json({ error: 'Jeton introuvable' });
+  const current = existing.rows[0];
+
+  const policy: TokenPolicy = {
+    permissions: normalizePermissions({ ...normalizePermissions(current.permissions), ...data.permissions }),
+    allowedFolderIds: data.allowedFolderIds ? [...new Set(data.allowedFolderIds)] : (Array.isArray(current.allowed_folder_ids) ? current.allowed_folder_ids : []),
+    deniedTagIds: data.deniedTagIds ? [...new Set(data.deniedTagIds)] : (Array.isArray(current.denied_tag_ids) ? current.denied_tag_ids : []),
+    autoTagId: data.autoTagId !== undefined ? data.autoTagId : current.auto_tag_id,
+  };
+  const problem = await checkTokenPolicy(req, policy, data.allowedFolderIds ?? []);
+  if (problem) return res.status(problem.status).json({ error: problem.error });
+
+  await pool.query(
+    `UPDATE api_tokens
+     SET name=$1, permissions=$2::jsonb, allowed_folder_ids=$3::jsonb, denied_tag_ids=$4::jsonb, auto_tag_id=$5
+     WHERE id=$6 AND user_id=$7`,
+    [data.name ?? current.name, JSON.stringify(policy.permissions), JSON.stringify(policy.allowedFolderIds),
+      JSON.stringify(policy.deniedTagIds), policy.autoTagId, req.params.id, req.user!.id],
+  );
+  const record = await pool.query(`${TOKEN_SELECT} WHERE t.id=$1`, [req.params.id]);
+  res.json({ record: presentToken(record.rows[0]) });
+});
+
 app.delete(['/api/tokens/:id', '/tokens/:id'], authenticate, async (req: AuthRequest, res) => {
-  if (req.authMethod !== 'session') return res.status(403).json({ error: 'Session navigateur requise' });
-  await pool.query('DELETE FROM api_tokens WHERE id=$1 AND user_id=$2', [req.params.id, req.user!.id]);
+  if (!canManageTokens(req, res)) return;
+  if (!UUID.safeParse(req.params.id).success) return res.status(404).json({ error: 'Jeton introuvable' });
+  // Les jetons créés par celui-ci sont supprimés avec lui (ON DELETE CASCADE).
+  const removed = await pool.query(
+    'DELETE FROM api_tokens WHERE id=$1 AND user_id=$2 AND ($3::uuid IS NULL OR created_by_token_id = $3::uuid)',
+    [req.params.id, req.user!.id, managerIdOf(req)],
+  );
+  if (!removed.rowCount) return res.status(404).json({ error: 'Jeton introuvable' });
   res.status(204).end();
 });
 
@@ -572,6 +1093,11 @@ const clipSchema = z.object({
 
 // Réception d'un clip depuis l'extension
 app.post(['/api/v1/clips', '/v1/clips'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  // Un clip devient une note sans dossier côté navigateur : il contournerait
+  // le périmètre d'un bot confiné, qui doit utiliser POST /api/v1/notes.
+  if (req.apiToken && (!req.apiToken.permissions.write || req.apiToken.folderScope !== null)) {
+    return res.status(403).json({ error: 'Ce jeton ne peut pas déposer de clip ; utilisez POST /api/v1/notes' });
+  }
   const parsed = clipSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Données de clip invalides', details: parsed.error.issues });
 
@@ -595,6 +1121,8 @@ app.post(['/api/v1/clips', '/v1/clips'], dataLimiter, authenticate, async (req: 
 
 // Récupération des clips en attente (drainés par l'app web)
 app.get(['/api/v1/clips/pending', '/v1/clips/pending'], authenticate, async (req: AuthRequest, res) => {
+  // Seule l'application web vide l'inbox ; un bot ne lit pas les clips des autres.
+  if (!requireSession(req, res)) return;
   const result = await pool.query(
     `SELECT id, type, title, content, url, metadata, created_at
      FROM clips
@@ -608,6 +1136,7 @@ app.get(['/api/v1/clips/pending', '/v1/clips/pending'], authenticate, async (req
 
 // Acquittement des clips traités par l'app web
 app.post(['/api/v1/clips/ack', '/v1/clips/ack'], authenticate, async (req: AuthRequest, res) => {
+  if (!requireSession(req, res)) return;
   const parsed = z.object({
     ids: z.array(z.string().uuid()),
   }).safeParse(req.body);
@@ -641,9 +1170,15 @@ app.delete('/workspace', authenticate, async (req: AuthRequest, res) => {
 });
 
 app.post('/rag/search', ragLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.read) {
+    return res.status(403).json({ error: 'Permission de recherche refusée pour ce jeton' });
+  }
   const parsed = z.object({ query: z.string().trim().min(1).max(4000), limit: z.number().int().min(1).max(20).optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Requête RAG invalide' });
-  const results = await hybridSearch(req.user!.id, parsed.data.query, parsed.data.limit ?? 6);
+  const results = await hybridSearch(req.user!.id, parsed.data.query, parsed.data.limit ?? 6, {
+    folderScope: folderScopeOf(req),
+    deniedTagIds: deniedTagsOf(req),
+  });
   res.json({ mode: 'hybrid-pgvector', results });
 });
 

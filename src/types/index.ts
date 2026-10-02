@@ -324,8 +324,12 @@ export interface StorageAdapter {
   readonly id: 'local-storage' | 'indexed-db' | 'remote';
   /** Charge l'état persisté ; null s'il n'existe pas encore. */
   load(): Promise<PersistedState | null>;
-  /** Sauvegarde l'état complet (remplacement atomique). */
-  save(state: PersistedState): Promise<void>;
+  /**
+   * Sauvegarde l'état complet (remplacement atomique). Peut renvoyer l'état
+   * réellement enregistré quand le backend a dû fusionner des écritures
+   * concurrentes (bots via l'API) ; le store doit alors l'appliquer.
+   */
+  save(state: PersistedState): Promise<PersistedState | void>;
   /** Supprime l'état persisté (réinitialisation). */
   clear(): Promise<void>;
   /** true si le backend est utilisable dans le contexte courant. */
