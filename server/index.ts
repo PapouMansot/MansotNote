@@ -878,6 +878,86 @@ app.post(['/api/v1/folders', '/v1/folders'], dataLimiter, authenticate, async (r
   }
 });
 
+const updateFolderSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  parentId: z.string().max(200).nullable().optional(),
+});
+
+app.patch(['/api/v1/folders/:id', '/v1/folders/:id'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.write) {
+    return res.status(403).json({ error: "Permission d'écriture refusée pour ce jeton" });
+  }
+  const parsed = updateFolderSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Données de dossier invalides', details: parsed.error.issues });
+  if (parsed.data.name === undefined && parsed.data.parentId === undefined) {
+    return res.status(400).json({ error: 'Rien à modifier : fournir name et/ou parentId' });
+  }
+  const id = String(req.params.id);
+  const scope = folderScopeOf(req);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const version = await lockWorkspace(client, req.user!.id);
+    const current = await client.query(
+      'SELECT id, name, parent_id as "parentId" FROM folders WHERE id=$1 AND user_id=$2 FOR UPDATE',
+      [id, req.user!.id],
+    );
+    if (!current.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Dossier introuvable' });
+    }
+    // Un jeton périmétré ne peut modifier que les dossiers de son périmètre.
+    if (!inFolderScope(req, id)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Ce jeton ne peut modifier que les dossiers de son périmètre' });
+    }
+    let parentId: string | null = parsed.data.parentId !== undefined ? parsed.data.parentId : current.rows[0].parentId;
+    if (parsed.data.parentId !== undefined) {
+      if (scope !== null && !inFolderScope(req, parentId)) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Ce jeton ne peut déplacer un dossier que vers un dossier de son périmètre' });
+      }
+      if (parentId !== null) {
+        const parent = await client.query('SELECT 1 FROM folders WHERE id=$1 AND user_id=$2', [parentId, req.user!.id]);
+        if (!parent.rowCount) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'Dossier parent introuvable' });
+        }
+        // Anti-cycle : le nouveau parent ne doit être ni le dossier lui-même, ni un descendant.
+        const cycle = await client.query(
+          `WITH RECURSIVE descendants AS (
+             SELECT id FROM folders WHERE id=$1
+             UNION ALL
+             SELECT f.id FROM folders f JOIN descendants d ON f.parent_id = d.id
+           )
+           SELECT 1 FROM folders WHERE id=$2 AND id IN (SELECT id FROM descendants)`,
+          [id, parentId],
+        );
+        if (cycle.rowCount) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Déplacement impossible : le parent serait un descendant du dossier' });
+        }
+      }
+    }
+    const result = await client.query(
+      `UPDATE folders SET name=$1, parent_id=$2
+       WHERE id=$3 AND user_id=$4
+       RETURNING id, name, parent_id as "parentId", order_index as "order", created_at as "createdAt"`,
+      [parsed.data.name ?? current.rows[0].name, parentId, id, req.user!.id],
+    );
+    await publishWorkspace(client, req.user!.id, version);
+    await client.query('COMMIT');
+    res.json(result.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[folders] erreur modification:', err instanceof Error ? err.message : err);
+    res.status(500).json({ error: 'Impossible de modifier le dossier' });
+  } finally {
+    client.release();
+  }
+});
+
 const createTagSchema = z.object({
   name: z.string().trim().min(1).max(60),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
@@ -935,6 +1015,80 @@ app.get(['/api/v1/tags', '/v1/tags'], dataLimiter, authenticate, async (req: Aut
     [req.user!.id, deniedTagsOf(req)],
   );
   res.json(tags.rows);
+});
+
+const updateTagSchema = z.object({
+  name: z.string().trim().min(1).max(60).optional(),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+});
+
+// Un tag peut être renommé / recoloré. Le renommage est idempotent : si un autre
+// tag porte déjà le nom cible (sans tenir compte de la casse), le conflit est renvoyé.
+app.patch(['/api/v1/tags/:id', '/v1/tags/:id'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.write) {
+    return res.status(403).json({ error: "Permission d'écriture refusée pour ce jeton" });
+  }
+  const parsed = updateTagSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Données de tag invalides', details: parsed.error.issues });
+  if (parsed.data.name === undefined && parsed.data.color === undefined) {
+    return res.status(400).json({ error: 'Rien à modifier : fournir name et/ou color' });
+  }
+  const id = String(req.params.id);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const version = await lockWorkspace(client, req.user!.id);
+    const current = await client.query(
+      'SELECT id, name, color FROM tags WHERE id=$1 AND user_id=$2 FOR UPDATE',
+      [id, req.user!.id],
+    );
+    if (!current.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Tag introuvable' });
+    }
+    // Un tag interdit à ce jeton est invisible : il ne peut pas non plus être modifié.
+    if (hasDeniedTag(req, [id])) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Tag inaccessible pour ce jeton' });
+    }
+    // Les tags sont communs à tout le carnet : un jeton limité à des dossiers ne peut modifier
+    // que les tags qui ne servent à aucune note hors de son périmètre.
+    const tagScope = folderScopeOf(req);
+    if (tagScope !== null) {
+      const outside = await client.query(
+        'SELECT 1 FROM notes WHERE user_id=$1 AND tag_ids ? $2::text AND (folder_id IS NULL OR NOT (folder_id = ANY($3::text[]))) LIMIT 1',
+        [req.user!.id, id, tagScope],
+      );
+      if (outside.rowCount) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Ce tag est utilisé par des notes hors du périmètre de ce jeton' });
+      }
+    }
+    if (parsed.data.name !== undefined && parsed.data.name.toLowerCase() !== current.rows[0].name.toLowerCase()) {
+      const taken = await client.query(
+        `SELECT 1 FROM tags WHERE user_id=$1 AND lower(name)=lower($2) AND id<>$3`,
+        [req.user!.id, parsed.data.name, id],
+      );
+      if (taken.rowCount) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Un tag porte déjà ce nom' });
+      }
+    }
+    const result = await client.query(
+      `UPDATE tags SET name=$1, color=$2 WHERE id=$3 AND user_id=$4
+       RETURNING id, name, color, created_at as "createdAt"`,
+      [parsed.data.name ?? current.rows[0].name, parsed.data.color ?? current.rows[0].color, id, req.user!.id],
+    );
+    await publishWorkspace(client, req.user!.id, version);
+    await client.query('COMMIT');
+    res.json(result.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[tags] erreur modification:', err instanceof Error ? err.message : err);
+    res.status(500).json({ error: 'Impossible de modifier le tag' });
+  } finally {
+    client.release();
+  }
 });
 
 // ==========================================
