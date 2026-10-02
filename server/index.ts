@@ -1091,6 +1091,119 @@ app.patch(['/api/v1/tags/:id', '/v1/tags/:id'], dataLimiter, authenticate, async
   }
 });
 
+// Suppression d'un dossier : uniquement s'il est vide (ni sous-dossier, ni note, archivée ou non).
+// Aucune note ne disparaît par ricochet ; l'historique des notes déjà supprimées reste restaurable.
+app.delete(['/api/v1/folders/:id', '/v1/folders/:id'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.delete) {
+    return res.status(403).json({ error: 'Permission de suppression refusée pour ce jeton' });
+  }
+  const id = String(req.params.id);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const version = await lockWorkspace(client, req.user!.id);
+    const current = await client.query(
+      'SELECT id, parent_id as "parentId" FROM folders WHERE id=$1 AND user_id=$2 FOR UPDATE',
+      [id, req.user!.id],
+    );
+    if (!current.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Dossier introuvable' });
+    }
+    if (!inFolderScope(req, id)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Ce jeton ne peut supprimer que les dossiers de son périmètre' });
+    }
+    // La racine du périmètre d'un jeton ne peut pas être supprimée par ce jeton.
+    if (folderScopeOf(req) !== null && !inFolderScope(req, current.rows[0].parentId)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: "Ce jeton ne peut pas supprimer la racine de son périmètre" });
+    }
+    const children = await client.query('SELECT count(*)::int AS n FROM folders WHERE parent_id=$1 AND user_id=$2', [id, req.user!.id]);
+    if (children.rows[0].n > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Le dossier contient ' + children.rows[0].n + ' sous-dossier(s) : les supprimer ou les déplacer d\'abord' });
+    }
+    const notes = await client.query('SELECT count(*)::int AS n FROM notes WHERE folder_id=$1 AND user_id=$2', [id, req.user!.id]);
+    if (notes.rows[0].n > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Le dossier contient ' + notes.rows[0].n + ' note(s) : les déplacer ou les supprimer d\'abord' });
+    }
+    await client.query('DELETE FROM folders WHERE id=$1 AND user_id=$2', [id, req.user!.id]);
+    await publishWorkspace(client, req.user!.id, version);
+    await client.query('COMMIT');
+    res.status(204).end();
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[folders] erreur suppression:', err instanceof Error ? err.message : err);
+    res.status(500).json({ error: 'Impossible de supprimer le dossier' });
+  } finally {
+    client.release();
+  }
+});
+
+// Suppression d'un tag : il est retiré de toutes les notes qui le portent (une version est créée pour
+// chacune dans l'historique). Un jeton ne peut pas supprimer un tag qu'un jeton (le sien ou un autre)
+// utilise comme interdit : cela rendrait visibles des notes protégées. Cette suppression reste à l'interface.
+app.delete(['/api/v1/tags/:id', '/v1/tags/:id'], dataLimiter, authenticate, async (req: AuthRequest, res) => {
+  if (req.apiToken && !req.apiToken.permissions.delete) {
+    return res.status(403).json({ error: 'Permission de suppression refusée pour ce jeton' });
+  }
+  const id = String(req.params.id);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const version = await lockWorkspace(client, req.user!.id);
+    await setActor(client, actorOf(req), typeof req.query.message === 'string' && req.query.message ? req.query.message.slice(0, 200) : 'Tag supprimé');
+    const current = await client.query('SELECT id FROM tags WHERE id=$1 AND user_id=$2 FOR UPDATE', [id, req.user!.id]);
+    if (!current.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Tag introuvable' });
+    }
+    if (hasDeniedTag(req, [id])) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Tag inaccessible pour ce jeton' });
+    }
+    if (req.apiToken) {
+      const protectedBy = await client.query(
+        'SELECT 1 FROM api_tokens WHERE user_id=$1 AND denied_tag_ids ? $2::text LIMIT 1',
+        [req.user!.id, id],
+      );
+      if (protectedBy.rowCount) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: "Ce tag protège des notes pour un jeton : sa suppression est réservée à l'interface" });
+      }
+      const tagScope = folderScopeOf(req);
+      if (tagScope !== null) {
+        const outside = await client.query(
+          'SELECT 1 FROM notes WHERE user_id=$1 AND tag_ids ? $2::text AND (folder_id IS NULL OR NOT (folder_id = ANY($3::text[]))) LIMIT 1',
+          [req.user!.id, id, tagScope],
+        );
+        if (outside.rowCount) {
+          await client.query('ROLLBACK');
+          return res.status(403).json({ error: 'Ce tag est utilisé par des notes hors du périmètre de ce jeton' });
+        }
+      }
+    }
+    await client.query('UPDATE notes SET tag_ids = tag_ids - $2::text WHERE user_id=$1 AND tag_ids ? $2::text', [req.user!.id, id]);
+    await client.query('DELETE FROM tags WHERE id=$1 AND user_id=$2', [id, req.user!.id]);
+    await client.query('UPDATE api_tokens SET auto_tag_id=NULL WHERE user_id=$1 AND auto_tag_id=$2', [req.user!.id, id]);
+    await client.query(
+      'UPDATE api_tokens SET denied_tag_ids = denied_tag_ids - $2::text WHERE user_id=$1 AND denied_tag_ids ? $2::text',
+      [req.user!.id, id],
+    );
+    await publishWorkspace(client, req.user!.id, version);
+    await client.query('COMMIT');
+    res.status(204).end();
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[tags] erreur suppression:', err instanceof Error ? err.message : err);
+    res.status(500).json({ error: 'Impossible de supprimer le tag' });
+  } finally {
+    client.release();
+  }
+});
+
 // ==========================================
 // Upload de médias / images (Supabase Storage)
 // ==========================================
