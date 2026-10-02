@@ -6,6 +6,8 @@
  * son créateur. Fonctions pures, sans accès base, pour être testables seules.
  */
 
+import { entriesWithin } from './network.js';
+
 export interface TokenPermissions {
   read: boolean;
   write: boolean;
@@ -19,6 +21,8 @@ export interface TokenPolicy {
   allowedFolderIds: string[];
   deniedTagIds: string[];
   autoTagId: string | null;
+  /** Adresses publiques autorisées (IP ou plages) ; vide = réseau privé / VPN seulement. */
+  allowedIps: string[];
 }
 
 export interface ParentLimits {
@@ -26,6 +30,7 @@ export interface ParentLimits {
   /** Dossiers accessibles au gestionnaire (sous-dossiers inclus) ; null = tous. */
   folderScope: string[] | null;
   deniedTagIds: string[];
+  allowedIps: string[];
 }
 
 /** Nombre maximal de jetons enfants par gestionnaire (freine un emballement). */
@@ -66,6 +71,11 @@ export function validateChildPolicy(parent: ParentLimits, child: TokenPolicy): s
   }
   if (parent.deniedTagIds.some((tag) => !child.deniedTagIds.includes(tag))) {
     return 'Les tags interdits au jeton gestionnaire doivent rester interdits à ses jetons';
+  }
+  if (!entriesWithin(parent.allowedIps, child.allowedIps)) {
+    return parent.allowedIps.length === 0
+      ? "Le jeton gestionnaire n'a accès à aucune adresse publique : ses jetons non plus"
+      : 'Adresse hors des adresses autorisées au jeton gestionnaire';
   }
   return null;
 }

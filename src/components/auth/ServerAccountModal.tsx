@@ -27,6 +27,7 @@ interface ApiToken {
   allowedFolderIds?: string[];
   deniedTagIds?: string[];
   autoTagId?: string | null;
+  allowedIps?: string[];
   createdByTokenId?: string | null;
   createdByName?: string | null;
   created_at: string;
@@ -44,6 +45,8 @@ interface TokenDraft {
   allowedFolderIds: string[];
   deniedTagIds: string[];
   autoTagId: string;
+  /** Adresses publiques autorisées, séparées par des virgules. */
+  allowedIps: string;
 }
 
 const EMPTY_DRAFT: TokenDraft = {
@@ -55,6 +58,7 @@ const EMPTY_DRAFT: TokenDraft = {
   allowedFolderIds: [],
   deniedTagIds: [],
   autoTagId: '',
+  allowedIps: '',
 };
 
 function draftFromToken(token: ApiToken): TokenDraft {
@@ -67,6 +71,7 @@ function draftFromToken(token: ApiToken): TokenDraft {
     allowedFolderIds: token.allowedFolderIds ?? [],
     deniedTagIds: token.deniedTagIds ?? [],
     autoTagId: token.autoTagId ?? '',
+    allowedIps: (token.allowedIps ?? []).join(', '),
   };
 }
 
@@ -77,6 +82,7 @@ function policyBody(draft: TokenDraft, withRead: boolean) {
     allowedFolderIds: draft.limitFolders ? draft.allowedFolderIds : [],
     deniedTagIds: draft.deniedTagIds,
     autoTagId: draft.autoTagId || null,
+    allowedIps: draft.allowedIps.split(/[\s,;]+/).filter(Boolean),
   };
 }
 
@@ -111,6 +117,24 @@ interface FieldsProps {
 /** Droits, dossiers, tags : le même formulaire sert à la création et à la modification. */
 function TokenPolicyFields({ draft, onChange, folders, tags, folderLabel }: FieldsProps) {
   const set = (patch: Partial<TokenDraft>) => onChange({ ...draft, ...patch });
+  const [ipHint, setIpHint] = useState('');
+  const fillMyIp = async () => {
+    setIpHint('');
+    try {
+      const res = await fetch('/api/client-ip');
+      const data = await res.json();
+      if (data.ip) {
+        const current = draft.allowedIps.split(/[\s,;]+/).filter(Boolean);
+        if (!current.includes(data.ip)) set({ allowedIps: [...current, data.ip].join(', ') });
+      } else if (data.private) {
+        setIpHint('Vous êtes sur le réseau privé : aucune adresse publique à ajouter pour cet accès.');
+      } else {
+        setIpHint('Adresse publique non déterminée depuis cet accès.');
+      }
+    } catch {
+      setIpHint('Impossible de lire votre adresse.');
+    }
+  };
   const chipBase = 'flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors';
   const chipOff = 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400';
 
@@ -226,6 +250,25 @@ function TokenPolicyFields({ draft, onChange, folders, tags, folderLabel }: Fiel
           </select>
         </label>
       </div>
+
+      <div className="space-y-1.5">
+        <div className="text-[11px] font-semibold text-zinc-600 dark:text-zinc-400">Accès depuis Internet (en plus du réseau privé / VPN)</div>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={draft.allowedIps}
+            onChange={(e) => set({ allowedIps: e.target.value })}
+            placeholder="ex. 86.208.132.174 ou 86.208.0.0/16"
+            className="field h-8 flex-1 px-2 font-mono text-xs"
+          />
+          <Button type="button" size="sm" variant="secondary" onClick={fillMyIp}>Mon IP actuelle</Button>
+        </div>
+        <p className="text-[11px] text-zinc-500">
+          Sans adresse, ce jeton ne fonctionne que depuis le réseau privé ou le VPN. Séparez plusieurs adresses par une virgule ;
+          les plages sont acceptées (/16 minimum).
+        </p>
+        {ipHint && <p className="text-[11px] text-amber-700 dark:text-amber-300">{ipHint}</p>}
+      </div>
     </div>
   );
 }
@@ -256,6 +299,18 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
   const [showRestrictions, setShowRestrictions] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<TokenDraft>(EMPTY_DRAFT);
+
+  // Adresse publique d'où vous êtes connecté (null sur le réseau privé) : préremplit les nouveaux jetons.
+  const [myIp, setMyIp] = useState<string | null>(null);
+  useEffect(() => {
+    fetch('/api/client-ip')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => setMyIp(typeof data?.ip === 'string' ? data.ip : null))
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (myIp) setNewDraft((draft) => (draft.allowedIps ? draft : { ...draft, allowedIps: myIp }));
+  }, [myIp]);
 
   const fetchTokens = async () => {
     try {
@@ -305,7 +360,7 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
       if (res.ok) {
         const data = await res.json();
         setCreatedToken(data.token);
-        setNewDraft(EMPTY_DRAFT);
+        setNewDraft({ ...EMPTY_DRAFT, allowedIps: myIp ?? '' });
         setShowRestrictions(false);
         await fetchTokens();
       } else {
@@ -426,6 +481,13 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
               <span>{showRestrictions ? 'Masquer les restrictions du bot' : "Configurer les restrictions d'accès & tags"}</span>
             </button>
 
+            {!showRestrictions && newDraft.allowedIps && (
+              <p className="text-[11px] text-zinc-500">
+                🌐 Accessible depuis Internet pour : <span className="font-mono">{newDraft.allowedIps}</span> (votre IP actuelle, modifiable dans
+                les restrictions) · réseau privé / VPN dans tous les cas.
+              </p>
+            )}
+
             {showRestrictions && (
               <TokenPolicyFields draft={newDraft} onChange={setNewDraft} folders={folders} tags={tags} folderLabel={folderLabel} />
             )}
@@ -522,6 +584,11 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
                         )}
                         {autoName && (
                           <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">🏷️ #{autoName}</span>
+                        )}
+                        {(t.allowedIps ?? []).length > 0 ? (
+                          <span className="rounded bg-sky-50 px-1.5 py-0.5 font-mono text-sky-700 dark:bg-sky-950/50 dark:text-sky-300">🌐 {(t.allowedIps ?? []).join(', ')}</span>
+                        ) : (
+                          <span className="text-zinc-400">🔒 Réseau privé / VPN seulement</span>
                         )}
                         {t.createdByTokenId && (
                           <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">créé par {t.createdByName ?? 'un jeton'}</span>

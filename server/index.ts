@@ -17,6 +17,7 @@ import {
   type TokenPermissions,
   type TokenPolicy,
 } from './token-policy.js';
+import { clientIpOf, evaluateAccess, isPrivateRequest, validateAllowedIps } from './network.js';
 import {
   createSessionToken,
   hashPassword,
@@ -29,6 +30,14 @@ const PORT = Number(process.env.PORT || 3000);
 const SESSION_COOKIE = 'mansot_session';
 const SESSION_DAYS = Math.max(1, Number(process.env.SESSION_DAYS || 30));
 const isProduction = process.env.NODE_ENV === 'production';
+// Un jeton de bot ne s'utilise que depuis le réseau privé (voir network.ts) ; le site public reste réservé aux sessions
+// navigateur. PRIVATE_TOKEN_HOSTS : noms internes supplémentaires jugés privés (ex. « marcelcave »).
+// ALLOW_PUBLIC_TOKENS=1 lève la restriction.
+const ALLOW_PUBLIC_TOKENS = /^(1|true|yes)$/i.test(process.env.ALLOW_PUBLIC_TOKENS || '');
+const PRIVATE_TOKEN_HOSTS = (process.env.PRIVATE_TOKEN_HOSTS || '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+const networkDeniedMessage = (ip: string | null): string =>
+  `Accès refusé : ce jeton n'est utilisable que depuis le réseau privé (adresse locale ou VPN du serveur) ou depuis une adresse IP enregistrée sur lui. `
+  + (ip ? `Adresse vue par le serveur : ${ip}. Ajoutez-la à ce jeton (Compte & Accès distant) pour l'autoriser.` : 'Adresse publique non déterminée.');
 
 const app = express();
 app.set('trust proxy', ['loopback', 'linklocal', 'uniquelocal']);
@@ -65,6 +74,7 @@ export interface ApiTokenData {
   allowedFolderIds: string[];
   deniedTagIds: string[];
   autoTagId: string | null;
+  allowedIps: string[];
   /**
    * Dossiers réellement accessibles (dossiers autorisés + sous-dossiers),
    * résolus à chaque requête. null = aucune restriction ; [] = aucun dossier
@@ -122,6 +132,20 @@ function requireSession(req: AuthRequest, res: Response): boolean {
   return false;
 }
 
+/** Éléments de la requête qui décident de son origine (réseau privé ou Cloudflare), voir network.ts. */
+function requestFacts(req: Request) {
+  const header = (name: string): string | undefined => {
+    const value = req.headers[name];
+    return Array.isArray(value) ? value.join(',') : value;
+  };
+  return {
+    host: req.headers.host,
+    forwardedFor: header('x-forwarded-for'),
+    cfConnectingIp: header('cf-connecting-ip'),
+    hasEdgeHeaders: Boolean(header('cf-connecting-ip') || header('cf-ray') || header('cdn-loop') || header('true-client-ip')),
+  };
+}
+
 async function authenticate(req: AuthRequest, res: Response, next: NextFunction) {
   // 1. Vérification Bearer Token (Extension Web Clipper, Webhooks, CLI)
   const authHeader = req.get('authorization');
@@ -133,7 +157,8 @@ async function authenticate(req: AuthRequest, res: Response, next: NextFunction)
         `SELECT u.id, u.username, t.id as token_id, t.name, t.permissions,
                 t.allowed_folder_ids as "allowedFolderIds",
                 t.denied_tag_ids as "deniedTagIds",
-                t.auto_tag_id as "autoTagId"
+                t.auto_tag_id as "autoTagId",
+                t.allowed_ips as "allowedIps"
          FROM api_tokens t
          JOIN users u ON u.id = t.user_id
          WHERE t.token_hash = $1
@@ -144,6 +169,11 @@ async function authenticate(req: AuthRequest, res: Response, next: NextFunction)
 
       if (tokenResult.rowCount) {
         const row = tokenResult.rows[0];
+        const allowedIps: string[] = Array.isArray(row.allowedIps) ? row.allowedIps : [];
+        if (!ALLOW_PUBLIC_TOKENS) {
+          const access = evaluateAccess(requestFacts(req), allowedIps, PRIVATE_TOKEN_HOSTS);
+          if (access.kind === 'denied') return res.status(403).json({ error: networkDeniedMessage(access.ip) });
+        }
         req.user = { id: row.id, username: row.username };
         req.authMethod = 'api_token';
         req.apiToken = {
@@ -153,6 +183,7 @@ async function authenticate(req: AuthRequest, res: Response, next: NextFunction)
           allowedFolderIds: Array.isArray(row.allowedFolderIds) ? row.allowedFolderIds : [],
           deniedTagIds: Array.isArray(row.deniedTagIds) ? row.deniedTagIds : [],
           autoTagId: typeof row.autoTagId === 'string' ? row.autoTagId : null,
+          allowedIps,
           folderScope: null,
         };
         if (req.apiToken.allowedFolderIds.length > 0) {
@@ -959,6 +990,13 @@ app.get(['/api/v1/ai/models', '/v1/ai/models'], dataLimiter, authenticate, (_req
 // Gestion des jetons : session navigateur, ou jeton « gestionnaire »
 // (permissions.manage) qui n'agit que sur les jetons qu'il a créés lui-même.
 // ==========================================
+// Adresse vue par le serveur pour cette requête : sert à remplir la liste d'adresses autorisées d'un jeton.
+app.get(['/api/client-ip', '/client-ip'], authenticate, (req: AuthRequest, res) => {
+  if (!requireSession(req, res)) return;
+  const facts = requestFacts(req);
+  res.json({ ip: clientIpOf(facts.forwardedFor, facts.cfConnectingIp), private: isPrivateRequest(facts, PRIVATE_TOKEN_HOSTS) });
+});
+
 function canManageTokens(req: AuthRequest, res: Response): boolean {
   if (req.authMethod === 'session' || req.apiToken?.permissions.manage) return true;
   res.status(403).json({ error: 'Session navigateur ou jeton gestionnaire requis' });
@@ -969,6 +1007,7 @@ const TOKEN_SELECT = `SELECT t.id, t.name, t.permissions,
        t.allowed_folder_ids as "allowedFolderIds",
        t.denied_tag_ids as "deniedTagIds",
        t.auto_tag_id as "autoTagId",
+       t.allowed_ips as "allowedIps",
        t.created_by_token_id as "createdByTokenId",
        p.name as "createdByName",
        t.created_at, t.last_used_at, t.expires_at
@@ -994,6 +1033,9 @@ async function checkTokenPolicy(req: AuthRequest, policy: TokenPolicy, newFolder
   // Un gestionnaire ne voit pas ses propres tags interdits (ils sont filtrés de /v1/tags) : il ne peut donc
   // pas les citer. Ils sont repris automatiquement chez l'enfant, qui ne peut jamais en avoir moins.
   if (req.apiToken) policy.deniedTagIds = [...new Set([...policy.deniedTagIds, ...req.apiToken.deniedTagIds])];
+  const ips = validateAllowedIps(policy.allowedIps);
+  if ('error' in ips) return { status: 400, error: ips.error };
+  policy.allowedIps = ips.entries;
   const invalid = validatePolicy(policy);
   if (invalid) return { status: 400, error: invalid };
   if (newFolderIds.length > 0) {
@@ -1002,7 +1044,7 @@ async function checkTokenPolicy(req: AuthRequest, policy: TokenPolicy, newFolder
   }
   if (req.apiToken) {
     const limit = validateChildPolicy(
-      { permissions: req.apiToken.permissions, folderScope: req.apiToken.folderScope, deniedTagIds: req.apiToken.deniedTagIds },
+      { permissions: req.apiToken.permissions, folderScope: req.apiToken.folderScope, deniedTagIds: req.apiToken.deniedTagIds, allowedIps: req.apiToken.allowedIps },
       policy,
     );
     if (limit) return { status: 403, error: limit };
@@ -1031,6 +1073,7 @@ const createTokenSchema = z.object({
   allowedFolderIds: z.array(z.string().max(200)).max(100).optional().default([]),
   deniedTagIds: z.array(z.string().max(200)).max(100).optional().default([]),
   autoTagId: z.string().max(200).nullable().optional(),
+  allowedIps: z.array(z.string().max(64)).max(20).optional().default([]),
 });
 
 app.post(['/api/tokens', '/tokens'], authenticate, async (req: AuthRequest, res) => {
@@ -1043,6 +1086,7 @@ app.post(['/api/tokens', '/tokens'], authenticate, async (req: AuthRequest, res)
     allowedFolderIds: [...new Set(parsed.data.allowedFolderIds)],
     deniedTagIds: [...new Set(parsed.data.deniedTagIds)],
     autoTagId: parsed.data.autoTagId || null,
+    allowedIps: parsed.data.allowedIps,
   };
   const problem = await checkTokenPolicy(req, policy, policy.allowedFolderIds);
   if (problem) return res.status(problem.status).json({ error: problem.error });
@@ -1057,11 +1101,11 @@ app.post(['/api/tokens', '/tokens'], authenticate, async (req: AuthRequest, res)
 
   const rawToken = `mn_${createSessionToken()}`;
   const inserted = await pool.query(
-    `INSERT INTO api_tokens(user_id, token_hash, name, permissions, allowed_folder_ids, denied_tag_ids, auto_tag_id, created_by_token_id)
-     VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8)
+    `INSERT INTO api_tokens(user_id, token_hash, name, permissions, allowed_folder_ids, denied_tag_ids, auto_tag_id, created_by_token_id, allowed_ips)
+     VALUES($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8, $9::jsonb)
      RETURNING id`,
     [req.user!.id, hashSessionToken(rawToken), parsed.data.name, JSON.stringify(policy.permissions),
-      JSON.stringify(policy.allowedFolderIds), JSON.stringify(policy.deniedTagIds), policy.autoTagId, managerId],
+      JSON.stringify(policy.allowedFolderIds), JSON.stringify(policy.deniedTagIds), policy.autoTagId, managerId, JSON.stringify(policy.allowedIps)],
   );
   const record = await pool.query(`${TOKEN_SELECT} WHERE t.id=$1`, [inserted.rows[0].id]);
 
@@ -1077,6 +1121,7 @@ const updateTokenSchema = z.object({
   allowedFolderIds: z.array(z.string().max(200)).max(100).optional(),
   deniedTagIds: z.array(z.string().max(200)).max(100).optional(),
   autoTagId: z.string().max(200).nullable().optional(),
+  allowedIps: z.array(z.string().max(64)).max(20).optional(),
 });
 
 app.patch(['/api/tokens/:id', '/tokens/:id'], authenticate, async (req: AuthRequest, res) => {
@@ -1087,7 +1132,7 @@ app.patch(['/api/tokens/:id', '/tokens/:id'], authenticate, async (req: AuthRequ
   const data = parsed.data;
 
   const existing = await pool.query(
-    `SELECT name, permissions, allowed_folder_ids, denied_tag_ids, auto_tag_id
+    `SELECT name, permissions, allowed_folder_ids, denied_tag_ids, auto_tag_id, allowed_ips
      FROM api_tokens
      WHERE id=$1 AND user_id=$2 AND ($3::uuid IS NULL OR created_by_token_id = $3::uuid)`,
     [req.params.id, req.user!.id, managerIdOf(req)],
@@ -1100,16 +1145,17 @@ app.patch(['/api/tokens/:id', '/tokens/:id'], authenticate, async (req: AuthRequ
     allowedFolderIds: data.allowedFolderIds ? [...new Set(data.allowedFolderIds)] : (Array.isArray(current.allowed_folder_ids) ? current.allowed_folder_ids : []),
     deniedTagIds: data.deniedTagIds ? [...new Set(data.deniedTagIds)] : (Array.isArray(current.denied_tag_ids) ? current.denied_tag_ids : []),
     autoTagId: data.autoTagId !== undefined ? data.autoTagId : current.auto_tag_id,
+    allowedIps: data.allowedIps ?? (Array.isArray(current.allowed_ips) ? current.allowed_ips : []),
   };
   const problem = await checkTokenPolicy(req, policy, data.allowedFolderIds ?? []);
   if (problem) return res.status(problem.status).json({ error: problem.error });
 
   await pool.query(
     `UPDATE api_tokens
-     SET name=$1, permissions=$2::jsonb, allowed_folder_ids=$3::jsonb, denied_tag_ids=$4::jsonb, auto_tag_id=$5
-     WHERE id=$6 AND user_id=$7`,
+     SET name=$1, permissions=$2::jsonb, allowed_folder_ids=$3::jsonb, denied_tag_ids=$4::jsonb, auto_tag_id=$5, allowed_ips=$6::jsonb
+     WHERE id=$7 AND user_id=$8`,
     [data.name ?? current.name, JSON.stringify(policy.permissions), JSON.stringify(policy.allowedFolderIds),
-      JSON.stringify(policy.deniedTagIds), policy.autoTagId, req.params.id, req.user!.id],
+      JSON.stringify(policy.deniedTagIds), policy.autoTagId, JSON.stringify(policy.allowedIps), req.params.id, req.user!.id],
   );
   const record = await pool.query(`${TOKEN_SELECT} WHERE t.id=$1`, [req.params.id]);
   res.json({ record: presentToken(record.rows[0]) });
