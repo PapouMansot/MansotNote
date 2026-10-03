@@ -23,6 +23,7 @@ import type {
 import { SCHEMA_VERSION } from '@/types';
 import { DEFAULT_SETTINGS } from '@/constants';
 import { shiftISODate, toISODate } from '@/lib/dates';
+import { newColumnId } from '@/lib/id';
 
 /** Version du jeu de données (permet de proposer une mise à jour plus tard). */
 export const SEED_VERSION = 1;
@@ -417,9 +418,9 @@ export function createSeedState(now: number = Date.now()): PersistedState {
  */
 export function createEmptyState(now: number = Date.now()): PersistedState {
   const columns: KanbanColumn[] = [
-    { id: 'col-todo', title: 'À faire', order: 0, createdAt: now },
-    { id: 'col-doing', title: 'En cours', order: 1, createdAt: now },
-    { id: 'col-done', title: 'Terminé', order: 2, createdAt: now },
+    { id: newColumnId(), title: 'À faire', order: 0, createdAt: now },
+    { id: newColumnId(), title: 'En cours', order: 1, createdAt: now },
+    { id: newColumnId(), title: 'Terminé', order: 2, createdAt: now },
   ];
 
   return {

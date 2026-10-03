@@ -24,6 +24,7 @@ import {
   StickyNote,
   Sun,
   Trash2,
+  X,
 } from 'lucide-react';
 import { COLOR_PALETTE, colorName, type Folder as FolderType, type ThemeMode } from '@/types';
 import { cn } from '@/lib/utils';
@@ -37,6 +38,7 @@ import { Menu } from '@/components/ui/Menu';
 import { ConfirmModal } from '@/components/ui/ConfirmModal';
 import { ServerAccountModal } from '@/components/auth/ServerAccountModal';
 import { BookmarkletModal } from '@/components/tools/BookmarkletModal';
+import { getSoul } from '@/lib/soul';
 import { logoutServer } from '@/lib/server-auth';
 
 const THEME_NEXT: Record<ThemeMode, ThemeMode> = {
@@ -302,11 +304,15 @@ function FolderNode({
 
 export interface SidebarProps {
   onOpenChat?: () => void;
+  /** Téléphone : menu escamotable plein largeur, jamais replié en rail. */
+  mobile?: boolean;
+  onClose?: () => void;
 }
 
-export function Sidebar({ onOpenChat: _onOpenChat }: SidebarProps = {}) {
+export function Sidebar({ onOpenChat: _onOpenChat, mobile = false, onClose }: SidebarProps = {}) {
   const view = useAppStore((s) => s.ui.view);
-  const collapsed = useAppStore((s) => s.ui.sidebarCollapsed);
+  const assistantName = useAppStore((s) => getSoul(s.data.settings).assistantName);
+  const collapsed = useAppStore((s) => s.ui.sidebarCollapsed) && !mobile;
   const folders = useAppStore((s) => s.data.folders);
   const tags = useAppStore((s) => s.data.tags);
   const notes = useAppStore((s) => s.data.notes);
@@ -428,7 +434,7 @@ export function Sidebar({ onOpenChat: _onOpenChat }: SidebarProps = {}) {
           onClick={() => setView('kanban')}
         />
         <IconButton
-          label="Copilote IA (Ctrl+3)"
+          label={`${assistantName} · Copilote (Ctrl+3)`}
           icon={<Sparkles size={17} className="text-indigo-600 dark:text-indigo-400" />}
           active={view === 'chat'}
           onClick={() => setView('chat')}
@@ -466,7 +472,13 @@ export function Sidebar({ onOpenChat: _onOpenChat }: SidebarProps = {}) {
 
   /* ------------------------------- Barre large ------------------------------ */
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/60">
+    <aside
+      className={
+        mobile
+          ? 'flex h-full w-full flex-col bg-zinc-50 pt-[env(safe-area-inset-top)] dark:bg-zinc-900'
+          : 'flex w-64 shrink-0 flex-col border-r border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/60'
+      }
+    >
       <div className="flex items-center gap-2.5 px-4 pb-2 pt-4">
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-indigo-500 text-sm font-bold text-white">
           M
@@ -474,11 +486,15 @@ export function Sidebar({ onOpenChat: _onOpenChat }: SidebarProps = {}) {
         <span className="flex-1 truncate text-sm font-semibold tracking-tight">
           MansotNote
         </span>
-        <IconButton
-          label="Replier la barre latérale"
-          icon={<PanelLeftClose size={16} />}
-          onClick={toggleSidebar}
-        />
+        {mobile ? (
+          <IconButton label="Fermer le menu" icon={<X size={18} />} className="h-10 w-10" onClick={onClose} />
+        ) : (
+          <IconButton
+            label="Replier la barre latérale"
+            icon={<PanelLeftClose size={16} />}
+            onClick={toggleSidebar}
+          />
+        )}
       </div>
 
       <div className="space-y-1 px-3 pb-3">
@@ -515,7 +531,7 @@ export function Sidebar({ onOpenChat: _onOpenChat }: SidebarProps = {}) {
         />
         <NavItem
           icon={<Sparkles size={16} className="text-indigo-600 dark:text-indigo-400" />}
-          label="SIA · Copilote"
+          label={`${assistantName} · Copilote`}
           hint="Ctrl+3"
           active={view === 'chat'}
           onClick={() => setView('chat')}

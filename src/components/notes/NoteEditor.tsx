@@ -4,6 +4,7 @@
  *  - actions : épingler, dupliquer, exporter .md, supprimer ;
  *  - barre d'état : statut d'autosave (useAutosave) + compteurs.
  */
+import { accountFetch as fetch } from '@/lib/browser-user';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
@@ -36,6 +37,7 @@ import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/app-store';
 import { useAutosave } from '@/hooks/useAutosave';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { useIsMobile } from '@/hooks/useIsMobile';
 import {
   correctText,
   isAiConfigured,
@@ -127,7 +129,9 @@ export function NoteEditor() {
         : undefined,
     [state.data.notes, draft],
   );
-  const mode = state.data.settings.editorMode;
+  const isMobile = useIsMobile();
+  // Deux colonnes sont illisibles sur téléphone : le réglage est gardé pour l'ordinateur.
+  const mode = isMobile && state.data.settings.editorMode === 'split' ? 'edit' : state.data.settings.editorMode;
 
   const isArchived = note?.archived === true;
 
@@ -650,13 +654,13 @@ export function NoteEditor() {
           onChange={(e) => state.setDraft({ title: e.target.value })}
         />
         <div className="flex items-center gap-0.5 rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-800/80">
-          {MODES.map(({ id, icon: Icon, label }) => (
+          {MODES.filter(({ id }) => !isMobile || id !== 'split').map(({ id, icon: Icon, label }) => (
             <IconButton
               key={id}
               label={label}
               icon={<Icon size={15} />}
               active={mode === id}
-              className="h-7 w-8"
+              className={isMobile ? 'h-9 w-10' : 'h-7 w-8'}
               onClick={() => state.updateSettings({ editorMode: id })}
             />
           ))}

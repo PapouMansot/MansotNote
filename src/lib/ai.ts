@@ -7,6 +7,7 @@
  * `chatComplete` est l'unique point d'accès réseau.
  */
 
+import { accountFetch as fetch } from '@/lib/browser-user';
 import type { AppSettings } from '@/types';
 import { DEFAULT_SETTINGS } from '@/constants';
 

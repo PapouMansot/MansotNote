@@ -107,6 +107,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         }
       } catch (error) {
         console.error('[store] bootstrap en échec', error);
+        throw error;
       }
       applyTheme(get().data.settings.theme);
     },

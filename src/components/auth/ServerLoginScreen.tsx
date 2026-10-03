@@ -4,7 +4,7 @@ import { loginServer, type ServerUser } from '@/lib/server-auth';
 import { Button } from '@/components/ui/Button';
 
 export function ServerLoginScreen({ onAuthenticated }: { onAuthenticated: (user: ServerUser) => Promise<void> }) {
-  const [username, setUsername] = useState('Pinguin');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');

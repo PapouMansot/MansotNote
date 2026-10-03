@@ -53,7 +53,7 @@ export async function indexWorkspace(client: PoolClient, userId: string, state: 
   // Une version devenue obsolète pendant le calcul des embeddings est jetée.
   await client.query('SELECT pg_advisory_lock(hashtext($1))', [userId]);
   try {
-  const chunks = (Array.isArray(state.notes) ? state.notes : []).flatMap(chunksFromNote);
+  const chunks: Chunk[] = (Array.isArray(state.notes) ? state.notes : []).flatMap(chunksFromNote);
   const current = await client.query('SELECT version FROM workspaces WHERE user_id=$1', [userId]);
   if (!current.rowCount || Number(current.rows[0].version) !== expectedVersion) return;
   const existingResult = await client.query('SELECT note_id,chunk_key,content_hash FROM note_chunks WHERE user_id=$1', [userId]);

@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { validateWorkspaceOwnership, WorkspaceOwnershipError } from './workspace-policy.js';
 
 export interface DbNote {
   id: string;
@@ -112,6 +113,7 @@ export async function syncWorkspaceToRelational(
   userId: string,
   state: any
 ): Promise<void> {
+  await validateWorkspaceOwnership(client, userId, state);
   // 1. Folders
   const folders = Array.isArray(state.folders) ? state.folders : [];
   const folderIds = folders.map((f: any) => f.id);
@@ -124,15 +126,21 @@ export async function syncWorkspaceToRelational(
     await client.query('DELETE FROM folders WHERE user_id=$1', [userId]);
   }
   for (const f of folders) {
-    await client.query(
+    const result = await client.query(
       `INSERT INTO folders (id, user_id, name, parent_id, order_index, created_at)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          parent_id = EXCLUDED.parent_id,
-         order_index = EXCLUDED.order_index`,
-      [f.id, userId, f.name, f.parentId || null, f.order ?? 0, f.createdAt ?? Date.now()]
+         order_index = EXCLUDED.order_index
+       WHERE folders.user_id = EXCLUDED.user_id`,
+      [f.id, userId, f.name, null, f.order ?? 0, f.createdAt ?? Date.now()]
     );
+    if (!result.rowCount) throw new WorkspaceOwnershipError();
+  }
+  // Les parents peuvent arriver après leurs enfants dans un import.
+  for (const f of folders) {
+    if (f.parentId) await client.query('UPDATE folders SET parent_id=$3 WHERE id=$1 AND user_id=$2', [f.id, userId, f.parentId]);
   }
 
   // 2. Tags
@@ -147,14 +155,16 @@ export async function syncWorkspaceToRelational(
     await client.query('DELETE FROM tags WHERE user_id=$1', [userId]);
   }
   for (const t of tags) {
-    await client.query(
+    const result = await client.query(
       `INSERT INTO tags (id, user_id, name, color, created_at)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
-         color = EXCLUDED.color`,
+         color = EXCLUDED.color
+       WHERE tags.user_id = EXCLUDED.user_id`,
       [t.id, userId, t.name, t.color ?? '#64748b', t.createdAt ?? Date.now()]
     );
+    if (!result.rowCount) throw new WorkspaceOwnershipError();
   }
 
   // 3. Notes
@@ -169,7 +179,7 @@ export async function syncWorkspaceToRelational(
     await client.query('DELETE FROM notes WHERE user_id=$1', [userId]);
   }
   for (const n of notes) {
-    await client.query(
+    const result = await client.query(
       `INSERT INTO notes (id, user_id, folder_id, title, content, tag_ids, pinned, archived, archived_at, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (id) DO UPDATE SET
@@ -180,7 +190,8 @@ export async function syncWorkspaceToRelational(
          pinned = EXCLUDED.pinned,
          archived = EXCLUDED.archived,
          archived_at = EXCLUDED.archived_at,
-         updated_at = EXCLUDED.updated_at`,
+         updated_at = EXCLUDED.updated_at
+       WHERE notes.user_id = EXCLUDED.user_id`,
       [
         n.id,
         userId,
@@ -195,6 +206,7 @@ export async function syncWorkspaceToRelational(
         n.updatedAt ?? Date.now(),
       ]
     );
+    if (!result.rowCount) throw new WorkspaceOwnershipError();
   }
 
   // 4. Kanban Columns
@@ -209,14 +221,16 @@ export async function syncWorkspaceToRelational(
     await client.query('DELETE FROM kanban_columns WHERE user_id=$1', [userId]);
   }
   for (const c of columns) {
-    await client.query(
+    const result = await client.query(
       `INSERT INTO kanban_columns (id, user_id, title, order_index, created_at)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE SET
          title = EXCLUDED.title,
-         order_index = EXCLUDED.order_index`,
+         order_index = EXCLUDED.order_index
+       WHERE kanban_columns.user_id = EXCLUDED.user_id`,
       [c.id, userId, c.title, c.order ?? 0, c.createdAt ?? Date.now()]
     );
+    if (!result.rowCount) throw new WorkspaceOwnershipError();
   }
 
   // 5. Kanban Labels
@@ -231,14 +245,16 @@ export async function syncWorkspaceToRelational(
     await client.query('DELETE FROM kanban_labels WHERE user_id=$1', [userId]);
   }
   for (const l of labels) {
-    await client.query(
+    const result = await client.query(
       `INSERT INTO kanban_labels (id, user_id, name, color, created_at)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
-         color = EXCLUDED.color`,
+         color = EXCLUDED.color
+       WHERE kanban_labels.user_id = EXCLUDED.user_id`,
       [l.id, userId, l.name, l.color ?? '#64748b', l.createdAt ?? Date.now()]
     );
+    if (!result.rowCount) throw new WorkspaceOwnershipError();
   }
 
   // 6. Kanban Cards
@@ -253,7 +269,7 @@ export async function syncWorkspaceToRelational(
     await client.query('DELETE FROM kanban_cards WHERE user_id=$1', [userId]);
   }
   for (const cd of cards) {
-    await client.query(
+    const result = await client.query(
       `INSERT INTO kanban_cards (id, user_id, column_id, order_index, title, description, label_ids, priority, due_date, checklist, linked_note_id, archived, archived_at, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        ON CONFLICT (id) DO UPDATE SET
@@ -268,7 +284,8 @@ export async function syncWorkspaceToRelational(
          linked_note_id = EXCLUDED.linked_note_id,
          archived = EXCLUDED.archived,
          archived_at = EXCLUDED.archived_at,
-         updated_at = EXCLUDED.updated_at`,
+         updated_at = EXCLUDED.updated_at
+       WHERE kanban_cards.user_id = EXCLUDED.user_id`,
       [
         cd.id,
         userId,
@@ -287,6 +304,7 @@ export async function syncWorkspaceToRelational(
         cd.updatedAt ?? Date.now(),
       ]
     );
+    if (!result.rowCount) throw new WorkspaceOwnershipError();
   }
 }
 

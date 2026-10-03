@@ -38,6 +38,8 @@ import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer';
 import { IconButton } from '@/components/ui/IconButton';
 import { Button } from '@/components/ui/Button';
 import { AiSettingsFields } from './AiSettingsFields';
+import { buildSoulPrompt, buildWelcomeMessage, getSoul } from '@/lib/soul';
+import { SoulEditButton } from '@/components/onboarding/SoulEditButton';
 import { ReasoningBlock } from './ReasoningBlock';
 import { cn } from '@/lib/utils';
 
@@ -97,20 +99,19 @@ export function AiChatDrawer({
 }) {
   const state = useAppStore();
   const settings = state.data.settings;
+  const soul = getSoul(settings);
+  const welcome = buildWelcomeMessage(soul);
   const updateSettings = state.updateSettings;
   const notes = state.data.notes;
   const cards = state.data.cards;
   const columns = state.data.columns;
 
   const [showSettings, setShowSettings] = useState(false);
-  const [messages, setMessages] = useState<AssistantTurn[]>([
-    {
-      id: 'welcome',
-      role: 'assistant',
-      content:
-        'Salut ! Je suis ton **Copilote IA** 🚀.\n\nJe peux analyser tes notes, découper tes projets en tâches Kanban, rédiger du contenu ou planifier tes prochaines actions.\n\nComment puis-je t\'aider à avancer aujourd\'hui ?',
-    },
+  const [rawMessages, setMessages] = useState<AssistantTurn[]>([
+    { id: 'welcome', role: 'assistant', content: welcome },
   ]);
+  // L'accueil suit toujours le nom et le ton choisis.
+  const messages = rawMessages.map((m) => (m.id === 'welcome' ? { ...m, content: welcome } : m));
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const aiValues = resolveAiSettings(settings);
@@ -131,7 +132,7 @@ export function AiChatDrawer({
     if (open) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, open]);
+  }, [rawMessages, open]);
 
   const buildWorkspaceContext = (): string => {
     const activeDraft = state.ui.noteDraft;
@@ -163,7 +164,8 @@ export function AiChatDrawer({
       .join('\n');
 
     return [
-      'Tu es SIA, l\'assistante IA personnelle et le copilote de productivité de MansotNote.',
+      buildSoulPrompt(soul),
+      'Tu es l\'assistante IA personnelle et le copilote de productivité de MansotNote.',
       'Aide l\'utilisateur à organiser ses projets, structurer ses idées, rédiger du contenu, corriger ses textes et planifier ses prochaines étapes.',
       '',
       activeNoteContext,
@@ -728,7 +730,7 @@ export function AiChatDrawer({
             <Sparkles size={15} />
           </div>
           <div>
-            <h2 className="text-sm font-semibold tracking-tight">SIA · Copilote</h2>
+            <h2 className="text-sm font-semibold tracking-tight">{soul.assistantName} · Copilote</h2>
             <p className="text-[10px] text-zinc-400 dark:text-zinc-500">
               {configured ? `Modèle : ${settings.aiModel}` : 'Non configuré'}
               {configured && (
@@ -791,6 +793,9 @@ export function AiChatDrawer({
             values={aiValues}
             onChange={(patch) => updateSettings(patch)}
           />
+          <div className="mt-3">
+            <SoulEditButton />
+          </div>
         </div>
       )}
 
@@ -810,7 +815,7 @@ export function AiChatDrawer({
               ) : (
                 <>
                   <Bot size={11} className="text-indigo-500" />
-                  <span>SIA</span>
+                  <span>{soul.assistantName}</span>
                 </>
               )}
             </div>

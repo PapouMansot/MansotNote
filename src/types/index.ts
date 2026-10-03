@@ -285,6 +285,33 @@ export interface AppSettings {
   aiEmbeddingModel: string;
   /** Rétention du modèle en mémoire pour Ollama (ex: '-1' pour indéfini, '24h', '1h', '5m'). */
   aiKeepAlive?: string;
+  /**
+   * Personnalisation de l'assistante IA (accueil « soul »). Absent tant que
+   * l'utilisateur n'a jamais vu ou validé l'écran de première utilisation.
+   */
+  soul?: AssistantSoul;
+}
+
+/** Tutoiement ou vouvoiement employé par l'assistante IA. */
+export type Formality = 'tu' | 'vous';
+
+/**
+ * Personnalisation de l'assistante IA, choisie lors de l'accueil « soul »
+ * (première utilisation) et modifiable ensuite depuis les réglages.
+ */
+export interface AssistantSoul {
+  /** Nom affiché de l'assistante (défaut : « SIA »). */
+  assistantName: string;
+  /** Prénom/surnom par lequel l'assistante doit appeler l'utilisateur. */
+  userName: string;
+  /** Id du préréglage de personnalité choisi (voir PERSONALITY_PRESETS). */
+  personality: string;
+  /** Précision libre et optionnelle sur la personnalité souhaitée. */
+  personalityNote: string;
+  /** Tutoiement ou vouvoiement. */
+  formality: Formality;
+  /** Horodatage de validation de l'accueil ; null si jamais complété. */
+  completedAt: Timestamp | null;
 }
 
 /**

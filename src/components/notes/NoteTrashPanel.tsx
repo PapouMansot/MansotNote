@@ -2,6 +2,7 @@
  * NoteTrashPanel : notes supprimées dont l'historique est encore conservé (90 jours). La restauration recrée la note
  * avec son dernier état, puis recharge l'application pour l'afficher.
  */
+import { accountFetch as fetch } from '@/lib/browser-user';
 import { useEffect, useState } from 'react';
 import { Loader2, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/Button';

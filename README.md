@@ -31,6 +31,11 @@ Conçu pour un usage auto-hébergé respectueux de la vie privée (Zero-Knowledg
 - Liens directs entre cartes Kanban et notes associées.
 
 ### 🔒 Sécurité & Auto-Hébergement
+- Plusieurs comptes personnels : notes, Kanban, réglages IA, historique et jetons API propres à chaque utilisateur.
+- Gestion des comptes dans **Compte & Accès distant → Utilisateurs** (administrateurs uniquement) : création, choix du rôle, désactivation/réactivation et réinitialisation du mot de passe.
+- Une désactivation conserve les données, déconnecte les sessions et bloque les jetons. Une réinitialisation du mot de passe déconnecte les sessions et conserve les jetons API.
+- Les conversations SIA restent dans le navigateur, avec un historique distinct par compte. La reprise de l'ancien coffre et des conversations historiques est réservée au premier compte.
+- Les images sont servies uniquement à leur propriétaire connecté. La migration `010_private_media.sql` rend privé le bucket Supabase `mansotnote-media` ; Nginx conserve la compatibilité des anciennes adresses d'images.
 - Déploiement conteneurisé Docker Compose (Base de données PostgreSQL 16 + `pgvector`, API backend Node.js, Frontend statique Nginx).
 - Sauvegarde automatisée de la base de données.
 - Support du reverse proxy avec terminaison SSL Let's Encrypt.
@@ -62,6 +67,8 @@ Renseigner les variables nécessaires :
 - `INITIAL_ADMIN_USERNAME` : identifiant administrateur initial
 - `INITIAL_ADMIN_PASSWORD` : mot de passe initial
 
+La migration `008_user_roles.sql` attribue une seule fois le rôle administrateur au plus ancien compte actif existant. Sur une installation neuve, le compte créé par les variables `INITIAL_ADMIN_*` est administrateur. Les mots de passe des nouveaux comptes doivent contenir au moins 12 caractères ; il n'y a pas d'inscription publique. Un administrateur ne peut pas désactiver son propre compte ni retirer son propre rôle. Les comptes ont des espaces indépendants ; le partage de notes entre comptes n'est pas inclus.
+
 ### Lancement via Docker Compose
 ```bash
 docker compose up -d --build
@@ -83,6 +90,7 @@ pnpm dev
 # Vérification des types et tests smoke
 pnpm typecheck
 pnpm smoke
+pnpm test:multiuser
 
 # Build de production
 pnpm build

@@ -9,6 +9,7 @@
  *  - Verrouillage automatique configurable sur inactivité.
  */
 import { STORAGE_KEYS } from '@/constants';
+import { getBrowserUser } from '@/lib/browser-user';
 import {
   computePasswordHash,
   decryptText,
@@ -102,6 +103,8 @@ export function resetFailedAttempts(): void {
 /* --------------------------- Configuration Auth --------------------------- */
 
 export function getAuthConfig(): AuthConfig | null {
+  // L'ancien coffre du navigateur appartient au compte historique.
+  if (getBrowserUser()?.legacyOwner === false) return null;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEYS.auth);
     if (!raw) return null;

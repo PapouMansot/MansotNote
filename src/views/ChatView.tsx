@@ -16,6 +16,7 @@ import {
   MessageSquare,
   PanelLeft,
   PanelLeftClose,
+  Minimize2,
   Pencil,
   Plus,
   RotateCcw,
@@ -39,6 +40,10 @@ import {
 import { retrieveContextHybrid } from '@/lib/retrieval';
 import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer';
 import { Button } from '@/components/ui/Button';
+import { IconButton } from '@/components/ui/IconButton';
+import { useIsMobile } from '@/hooks/useIsMobile';
+import { buildSoulPrompt, buildWelcomeMessage, getSoul } from '@/lib/soul';
+import { SoulEditButton } from '@/components/onboarding/SoulEditButton';
 import { AiSettingsFields } from '@/components/ai/AiSettingsFields';
 import { isDeleteAllCardsRequest, type ActionProposal } from '@/components/ai/AiChatDrawer';
 import { ReasoningBlock } from '@/components/ai/ReasoningBlock';
@@ -82,9 +87,12 @@ const HERO_PROMPTS = [
   },
 ];
 
-export function ChatView() {
+export function ChatView({ onExit }: { onExit?: () => void } = {}) {
   const state = useAppStore();
+  const isMobile = useIsMobile();
   const settings = state.data.settings;
+  const soul = getSoul(settings);
+  const welcome = buildWelcomeMessage(soul);
   const updateSettings = state.updateSettings;
   const notes = state.data.notes;
   const cards = state.data.cards;
@@ -92,13 +100,16 @@ export function ChatView() {
   const noteDraft = state.ui.noteDraft;
 
   const [showSettings, setShowSettings] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Téléphone : la liste des conversations s'ouvre à la demande, par-dessus le chat.
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => typeof window.matchMedia !== 'function' || !window.matchMedia('(max-width: 767px)').matches,
+  );
 
   // Conversations persistantes enregistrées dans localStorage
   const [conversations, setConversations] = useState<ChatConversation[]>(() => {
     const saved = loadSavedConversations();
     if (saved.length > 0) return saved;
-    const initial = createNewConversation('Discussion principale');
+    const initial = createNewConversation('Discussion principale', welcome);
     saveConversationsToStorage([initial]);
     return [initial];
   });
@@ -114,7 +125,14 @@ export function ChatView() {
     return conversations.find((c) => c.id === activeConvId) || conversations[0];
   }, [conversations, activeConvId]);
 
-  const messages = activeConv?.messages || [];
+  // Le message d'accueil suit toujours le nom et le ton choisis, même pour une ancienne conversation.
+  const messages = useMemo(
+    () =>
+      (activeConv?.messages || []).map((m) =>
+        m.role === 'assistant' && m.id.startsWith('welcome') ? { ...m, content: welcome } : m,
+      ),
+    [activeConv, welcome],
+  );
 
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -141,7 +159,8 @@ export function ChatView() {
   }, [messages, loading]);
 
   useEffect(() => {
-    textareaRef.current?.focus();
+    // Sur téléphone, le clavier masquerait la conversation dès l'ouverture.
+    if (!isMobile) textareaRef.current?.focus();
   }, [activeConvId]);
 
   useEffect(() => {
@@ -177,7 +196,7 @@ export function ChatView() {
   };
 
   const handleNewConversation = () => {
-    const fresh = createNewConversation(`Conversation ${conversations.length + 1}`);
+    const fresh = createNewConversation(`Conversation ${conversations.length + 1}`, welcome);
     const nextList = [fresh, ...conversations];
     setConversations(nextList);
     setActiveConvId(fresh.id);
@@ -188,7 +207,7 @@ export function ChatView() {
   const handleDeleteConversation = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (conversations.length <= 1) {
-      const fresh = createNewConversation('Discussion principale');
+      const fresh = createNewConversation('Discussion principale', welcome);
       setConversations([fresh]);
       setActiveConvId(fresh.id);
       saveConversationsToStorage([fresh]);
@@ -234,7 +253,8 @@ export function ChatView() {
       .join('\n');
 
     return [
-      'Tu es SIA, l\'assistante IA personnelle et le copilote de productivité de MansotNote.',
+      buildSoulPrompt(soul),
+      'Tu es l\'assistante IA personnelle et le copilote de productivité de MansotNote.',
       'Aide l\'utilisateur à organiser ses projets, structurer ses idées, rédiger du contenu, corriger ses textes et planifier ses prochaines étapes.',
       '',
       activeNoteContext,
@@ -771,10 +791,20 @@ export function ChatView() {
   };
 
   return (
-    <div className="flex h-full bg-zinc-50 dark:bg-zinc-950">
+    <div className="relative flex h-full bg-zinc-50 dark:bg-zinc-950">
       {/* ------------------- Volet latéral Conversations ------------------- */}
+      {sidebarOpen && isMobile && (
+        <div className="absolute inset-0 z-30 bg-black/50" aria-hidden onClick={() => setSidebarOpen(false)} />
+      )}
       {sidebarOpen && (
-        <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-200 bg-zinc-100/80 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/60">
+        <aside
+          className={cn(
+            'flex flex-col border-r border-zinc-200 dark:border-zinc-800',
+            isMobile
+              ? 'absolute inset-y-0 left-0 z-40 w-[85%] max-w-xs bg-zinc-100 shadow-2xl dark:bg-zinc-900'
+              : 'w-64 shrink-0 bg-zinc-100/80 backdrop-blur dark:bg-zinc-900/60',
+          )}
+        >
           <div className="flex h-14 items-center justify-between border-b border-zinc-200/80 px-3.5 dark:border-zinc-800/80">
             <span className="flex items-center gap-2 text-xs font-bold text-zinc-700 dark:text-zinc-300">
               <MessageSquare size={15} className="text-indigo-600 dark:text-indigo-400" />
@@ -798,9 +828,13 @@ export function ChatView() {
               return (
                 <div
                   key={conv.id}
-                  onClick={() => setActiveConvId(conv.id)}
+                  onClick={() => {
+                    setActiveConvId(conv.id);
+                    if (isMobile) setSidebarOpen(false);
+                  }}
                   className={cn(
-                    'group flex cursor-pointer items-center justify-between rounded-xl px-2.5 py-2 text-xs transition-all',
+                    'group flex cursor-pointer items-center justify-between rounded-xl px-2.5 text-xs transition-all',
+                    isMobile ? 'min-h-[48px] py-2.5' : 'py-2',
                     isActive
                       ? 'bg-white font-semibold text-indigo-900 shadow-sm dark:bg-zinc-800 dark:text-indigo-200'
                       : 'text-zinc-600 hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800/50 dark:hover:text-zinc-200',
@@ -815,7 +849,10 @@ export function ChatView() {
                   <button
                     type="button"
                     onClick={(e) => handleDeleteConversation(conv.id, e)}
-                    className="opacity-0 transition-opacity group-hover:opacity-100 p-1 text-zinc-400 hover:text-red-500 dark:text-zinc-500 dark:hover:text-red-400"
+                    className={cn(
+                      'p-1 text-zinc-400 transition-opacity hover:text-red-500 dark:text-zinc-500 dark:hover:text-red-400',
+                      isMobile ? 'p-2.5' : 'opacity-0 group-hover:opacity-100',
+                    )}
                     title="Supprimer cette conversation"
                   >
                     <Trash2 size={13} />
@@ -830,34 +867,35 @@ export function ChatView() {
       {/* ------------------------- Zone Principale ------------------------- */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* ----------------------------- En-tête ----------------------------- */}
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-zinc-200 bg-white/80 px-4 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/80">
-          <div className="flex items-center gap-3">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-white/80 px-2 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/80 md:px-4">
+          <div className="flex min-w-0 items-center gap-2 md:gap-3">
             <button
               type="button"
               onClick={() => setSidebarOpen((v) => !v)}
-              className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+              className="shrink-0 rounded-lg p-2 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 md:p-1.5"
               title={sidebarOpen ? 'Masquer les conversations' : 'Afficher les conversations'}
+              aria-label={sidebarOpen ? 'Masquer les conversations' : 'Afficher les conversations'}
             >
               {sidebarOpen ? <PanelLeftClose size={17} /> : <PanelLeft size={17} />}
             </button>
 
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-tr from-indigo-600 to-indigo-500 text-white shadow-md shadow-indigo-500/20">
+            <div className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-tr from-indigo-600 to-indigo-500 text-white shadow-md shadow-indigo-500/20 md:flex">
               <Sparkles size={17} />
             </div>
 
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-sm font-bold tracking-tight text-zinc-900 dark:text-zinc-100 truncate max-w-[200px] sm:max-w-xs">
-                  {activeConv?.title || 'SIA'}
+                <h1 className="truncate text-sm font-bold tracking-tight text-zinc-900 dark:text-zinc-100 md:max-w-xs">
+                  {activeConv?.title || soul.assistantName}
                 </h1>
-                <span className="rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:bg-indigo-400/10 dark:text-indigo-300">
+                <span className="hidden shrink-0 rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-600 dark:bg-indigo-400/10 dark:text-indigo-300 md:inline">
                   Copilote IA
                 </span>
               </div>
-              <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+              <p className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
                 {configured ? `Modèle : ${settings.aiModel}` : 'Non configuré'}
                 {configured && (
-                  <span className="ml-1.5 font-medium text-zinc-400 dark:text-zinc-500">
+                  <span className="ml-1.5 hidden font-medium text-zinc-400 dark:text-zinc-500 md:inline">
                     · RAG {ragMode === 'hybrid' ? 'sémantique & mots-clés' : 'mots-clés'}
                   </span>
                 )}
@@ -865,30 +903,47 @@ export function ChatView() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1 md:gap-2">
             {noteDraft?.noteId && (
-              <div className="hidden items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50/50 px-2.5 py-1 text-xs text-indigo-700 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-300 sm:flex">
+              <div className="hidden items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50/50 px-2.5 py-1 text-xs text-indigo-700 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-300 lg:flex">
                 <FileEdit size={13} />
                 <span className="max-w-[140px] truncate">Note active : {noteDraft.title || 'Sans titre'}</span>
               </div>
             )}
-            <Button
-              size="sm"
-              variant="ghost"
-              icon={<Settings2 size={14} />}
-              onClick={() => setShowSettings((v) => !v)}
-            >
-              Paramètres IA
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              icon={<RotateCcw size={14} />}
-              onClick={handleNewConversation}
-              title="Créer une nouvelle conversation"
-            >
-              Nouveau chat
-            </Button>
+            {isMobile ? (
+              <>
+                <IconButton label="Paramètres IA" icon={<Settings2 size={17} />} className="h-10 w-10" active={showSettings} onClick={() => setShowSettings((v) => !v)} />
+                <IconButton label="Nouveau chat" icon={<RotateCcw size={16} />} className="h-10 w-10" onClick={handleNewConversation} />
+              </>
+            ) : (
+              <>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon={<Settings2 size={14} />}
+                  onClick={() => setShowSettings((v) => !v)}
+                >
+                  Paramètres IA
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon={<RotateCcw size={14} />}
+                  onClick={handleNewConversation}
+                  title="Créer une nouvelle conversation"
+                >
+                  Nouveau chat
+                </Button>
+              </>
+            )}
+            {onExit && (
+              <IconButton
+                label="Quitter le plein écran"
+                icon={<Minimize2 size={isMobile ? 17 : 15} />}
+                className={isMobile ? 'h-10 w-10' : undefined}
+                onClick={onExit}
+              />
+            )}
           </div>
         </header>
 
@@ -912,6 +967,9 @@ export function ChatView() {
                 values={aiValues}
                 onChange={(patch) => updateSettings(patch)}
               />
+              <div className="mt-3">
+                <SoulEditButton />
+              </div>
             </div>
           </div>
         )}
@@ -959,7 +1017,7 @@ export function ChatView() {
                   ) : (
                     <>
                       <Bot size={12} className="text-indigo-500" />
-                      <span>SIA</span>
+                      <span>{soul.assistantName}</span>
                     </>
                   )}
                 </div>
@@ -1103,7 +1161,7 @@ export function ChatView() {
         </div>
 
         {/* ------------------------- Zone de saisie -------------------------- */}
-        <div className="shrink-0 border-t border-zinc-200 bg-white/90 p-4 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90">
+        <div className="shrink-0 border-t border-zinc-200 bg-white/90 p-2.5 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90 md:p-4">
           <div className="mx-auto max-w-3xl">
             <form
               onSubmit={(e) => {
@@ -1114,12 +1172,12 @@ export function ChatView() {
             >
               <textarea
                 ref={textareaRef}
-                rows={2}
+                rows={isMobile ? 1 : 2}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Posez une question, demandez une note, des tâches Kanban, ou une correction..."
-                className="max-h-40 min-h-[48px] flex-1 resize-none bg-transparent px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500"
+                placeholder={isMobile ? `Message à ${soul.assistantName}…` : 'Posez une question, demandez une note, des tâches Kanban, ou une correction...'}
+                className="max-h-40 min-h-[44px] min-w-0 flex-1 resize-none bg-transparent px-3 py-2 text-base text-zinc-900 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500 md:min-h-[48px] md:text-sm"
               />
               <div className="flex items-center gap-1.5 pb-1 pr-1">
                 <Button
@@ -1133,7 +1191,7 @@ export function ChatView() {
                 </Button>
               </div>
             </form>
-            <div className="mt-2 flex items-center justify-between text-[11px] text-zinc-400 dark:text-zinc-500">
+            <div className="mt-2 hidden items-center justify-between text-[11px] text-zinc-400 dark:text-zinc-500 md:flex">
               <span><kbd className="font-mono">Entrée</kbd> pour envoyer · <kbd className="font-mono">Maj + Entrée</kbd> pour un saut de ligne</span>
               <span>Raccourci Copilote : <kbd className="font-mono">Ctrl + 3</kbd></span>
             </div>

@@ -14,6 +14,7 @@
  * rares (discriminants) et compense la longueur des passages : une note de
  * 5000 mots ne domine plus mécaniquement une note courte et précise.
  */
+import { accountFetch as fetch } from '@/lib/browser-user';
 import type { Note, Tag, Folder, ID } from '@/types';
 import type { AiConfig } from '@/lib/ai';
 import { embedTexts } from '@/lib/ai';

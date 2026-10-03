@@ -10,6 +10,8 @@
     "build:extension": "node scripts/generate-extension-icons.mjs && node scripts/build-extension.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "test:multiuser": "node scripts/test-multiuser.mjs",
+    "test:soul": "node scripts/test-soul.mjs",
     "smoke": "esbuild src/lib/export.ts src/lib/ai.ts src/store/app-store.ts src/store/persist.ts src/hooks/useKeyboardShortcuts.ts --bundle --format=esm --platform=node \"--alias:@=./src\" \"--define:import.meta.env={}\" --outdir=node_modules/.cache/smoke && node scripts/smoke-pass1.mjs",
     "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/index.mjs",
     "start:server": "node dist-server/index.mjs"
@@ -36,6 +38,8 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-pgvector": "^0.0.9",
     "@tailwindcss/typography": "^0.5.15",
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.6",

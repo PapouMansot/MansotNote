@@ -1,7 +1,7 @@
-import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
-import { promisify } from 'node:util';
+import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual, type ScryptOptions } from 'node:crypto';
 
-const scrypt = promisify(scryptCallback);
+const scrypt = (password: string, salt: Buffer, length: number, options: ScryptOptions): Promise<Buffer> =>
+  new Promise((resolve, reject) => scryptCallback(password, salt, length, options, (error, key) => error ? reject(error) : resolve(key)));
 const KEY_LENGTH = 64;
 const SCRYPT_N = 1 << 15;
 const SCRYPT_R = 8;

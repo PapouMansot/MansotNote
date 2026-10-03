@@ -1,5 +1,6 @@
 import type { PersistedState, StorageAdapter } from '@/types';
 import { detachMissingFolders, mergeFolders, mergeNotes, mergeTags } from '@/lib/workspace-merge';
+import { accountFetch } from '@/lib/browser-user';
 
 let workspaceVersion = 0;
 /** Ids des notes et dossiers connus lors de la dernière synchro réussie (base de fusion). */
@@ -12,15 +13,15 @@ const MAX_MERGE_ATTEMPTS = 3;
 class ConflictError extends Error {}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, {
+  const response = await accountFetch(`/api${path}`, {
     ...init,
     credentials: 'include',
     headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
   });
   if (response.status === 401) throw new Error('SESSION_EXPIRED');
   if (!response.ok) {
-    const body = await response.json().catch(() => ({})) as { error?: string };
-    if (response.status === 409) {
+    const body = await response.json().catch(() => ({})) as { error?: string; version?: number };
+    if (response.status === 409 && typeof body.version === 'number') {
       throw new ConflictError('Conflit de synchronisation : recharge les données avant de réessayer.');
     }
     throw new Error(body.error || `API HTTP ${response.status}`);
@@ -71,11 +72,19 @@ export class RemoteStorageAdapter implements StorageAdapter {
         const server = await fetchWorkspace();
         workspaceVersion = server.version;
         const folders = mergeFolders(candidate.folders, server.state?.folders ?? [], baseFolderIds);
+        const tags = mergeTags(candidate.tags, server.state?.tags ?? [], baseTagIds);
+        const tagIds = new Set(tags.map((tag) => tag.id));
+        const folderIds = new Set(folders.map((folder) => folder.id));
+        const notes = detachMissingFolders(mergeNotes(candidate.notes, server.state?.notes ?? [], baseNoteIds), folders)
+          .map((note) => ({ ...note, tagIds: note.tagIds.filter((id) => tagIds.has(id)) }));
+        const noteIds = new Set(notes.map((note) => note.id));
         candidate = {
           ...candidate,
-          folders,
-          tags: mergeTags(candidate.tags, server.state?.tags ?? [], baseTagIds),
-          notes: detachMissingFolders(mergeNotes(candidate.notes, server.state?.notes ?? [], baseNoteIds), folders),
+          folders: folders.map((folder) => folder.parentId && !folderIds.has(folder.parentId) ? { ...folder, parentId: null } : folder),
+          tags,
+          notes,
+          cards: candidate.cards.map((card) => card.linkedNoteId && !noteIds.has(card.linkedNoteId) ? { ...card, linkedNoteId: null } : card),
+          settings: { ...candidate.settings, defaultFolderId: candidate.settings.defaultFolderId && folderIds.has(candidate.settings.defaultFolderId) ? candidate.settings.defaultFolderId : null },
         };
         rememberBase(server.state);
         merged = true;

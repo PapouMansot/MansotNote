@@ -115,8 +115,11 @@ export function resolveColumnId(requested?: string): string {
   // 2. Alias logiques → titre de colonne
   const aliases: Record<string, RegExp> = {
     todo: /à\s*faire|todo/i,
+    'col-todo': /à\s*faire|todo/i,
     in_progress: /en\s*cours|progress|doing/i,
+    'col-doing': /en\s*cours|progress|doing/i,
     done: /termin|done|fini/i,
+    'col-done': /termin|done|fini/i,
     backlog: /backlog|id[ée]e/i,
   };
   const pattern = requested ? aliases[requested.toLowerCase()] : undefined;

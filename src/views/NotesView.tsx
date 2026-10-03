@@ -6,6 +6,7 @@ import { useMemo, useRef, useState } from 'react';
 import {
   Archive,
   ArchiveRestore,
+  ChevronLeft,
   Copy,
   Folder,
   FolderMinus,
@@ -26,6 +27,7 @@ import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/app-store';
 import { selectNoteList } from '@/store/selectors';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { useIsMobile } from '@/hooks/useIsMobile';
 import { SearchInput, Select } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { IconButton } from '@/components/ui/IconButton';
@@ -261,6 +263,7 @@ export function NotesView() {
   const searchRef = useRef<HTMLInputElement>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<Note | null>(null);
+  const isMobile = useIsMobile();
 
   useKeyboardShortcuts({
     'search.focus': () => {
@@ -283,10 +286,18 @@ export function NotesView() {
   const activeTag =
     filter.tagId !== 'all' ? state.data.tags.find((t) => t.id === filter.tagId) : undefined;
 
+  const editorOpen = activeNoteId !== null && state.ui.noteDraft !== null;
+
   return (
     <div className="flex h-full">
       {/* ------------------------------ Liste ------------------------------ */}
-      <section className="flex w-80 shrink-0 flex-col border-r border-zinc-200 dark:border-zinc-800">
+      {/* Téléphone : la liste occupe tout l'écran, puis l'éditeur la remplace. */}
+      <section
+        className={cn(
+          'flex-col border-zinc-200 dark:border-zinc-800',
+          isMobile ? (editorOpen ? 'hidden' : 'flex w-full') : 'flex w-80 shrink-0 border-r',
+        )}
+      >
         <div className="space-y-1.5 border-b border-zinc-200 p-2.5 dark:border-zinc-800">
           <Button
             className="w-full"
@@ -444,9 +455,27 @@ export function NotesView() {
       </section>
 
       {/* ------------------------------ Éditeur ------------------------------ */}
-      <section className="min-w-0 flex-1">
-        {activeNoteId !== null && state.ui.noteDraft !== null ? (
-          <NoteEditor />
+      <section className={cn('min-w-0 flex-1', isMobile && !editorOpen && 'hidden')}>
+        {editorOpen ? (
+          isMobile ? (
+            <div className="flex h-full flex-col">
+              <div className="flex shrink-0 items-center border-b border-zinc-200 px-1 dark:border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => state.closeNote()}
+                  className="flex h-11 items-center gap-1 rounded-lg px-2 text-sm font-medium text-indigo-600 dark:text-indigo-400"
+                >
+                  <ChevronLeft size={18} />
+                  Notes
+                </button>
+              </div>
+              <div className="min-h-0 flex-1">
+                <NoteEditor />
+              </div>
+            </div>
+          ) : (
+            <NoteEditor />
+          )
         ) : (
           <EmptyState
             icon={<StickyNote size={22} />}

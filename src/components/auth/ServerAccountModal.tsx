@@ -13,6 +13,7 @@ import {
   Tag as TagIcon,
   Trash2,
   X,
+  Users,
 } from 'lucide-react';
 import { changeServerPassword } from '@/lib/server-auth';
 import { Modal } from '@/components/ui/Modal';
@@ -20,6 +21,8 @@ import { Button } from '@/components/ui/Button';
 import { useAppStore } from '@/store/app-store';
 import { NoteTrashPanel } from '@/components/notes/NoteTrashPanel';
 import type { Folder, Tag } from '@/types';
+import { getBrowserUser, accountFetch as fetch } from '@/lib/browser-user';
+import { UsersPanel } from './UsersPanel';
 
 interface ApiToken {
   id: string;
@@ -275,7 +278,8 @@ function TokenPolicyFields({ draft, onChange, folders, tags, folderLabel }: Fiel
 }
 
 export function ServerAccountModal({ onClose }: { onClose: () => void }) {
-  const [activeTab, setActiveTab] = useState<'security' | 'tokens' | 'trash'>('tokens');
+  const [activeTab, setActiveTab] = useState<'security' | 'tokens' | 'trash' | 'users'>('tokens');
+  const user = getBrowserUser();
 
   const folders = useAppStore((s) => s.data.folders);
   const tags = useAppStore((s) => s.data.tags);
@@ -425,7 +429,7 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const tabClass = (tab: 'tokens' | 'security' | 'trash') =>
+  const tabClass = (tab: 'tokens' | 'security' | 'trash' | 'users') =>
     clsx(
       'flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold',
       activeTab === tab
@@ -434,8 +438,8 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
     );
 
   return (
-    <Modal title="Compte & Accès distant (Bots & IA)" onClose={onClose}>
-      <div className="mb-4 flex border-b border-zinc-200 dark:border-zinc-800">
+    <Modal title={`Compte & Accès distant${user ? ' · ' + user.username : ''}`} onClose={onClose} wide={activeTab === 'users'}>
+      <div className="mb-4 flex flex-wrap border-b border-zinc-200 dark:border-zinc-800">
         <button type="button" onClick={() => setActiveTab('tokens')} className={tabClass('tokens')}>
           <Key size={14} />
           <span>Jetons API & Bots (Hermès / Mia)</span>
@@ -448,6 +452,7 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
           <Trash2 size={14} />
           <span>Corbeille</span>
         </button>
+        {user?.role === 'admin' && <button type="button" onClick={() => setActiveTab('users')} className={tabClass('users')}><Users size={14} /><span>Utilisateurs</span></button>}
       </div>
 
       {activeTab === 'tokens' ? (
@@ -635,6 +640,8 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
             )}
           </div>
         </div>
+      ) : activeTab === 'users' ? (
+        <UsersPanel />
       ) : activeTab === 'trash' ? (
         <NoteTrashPanel />
       ) : (

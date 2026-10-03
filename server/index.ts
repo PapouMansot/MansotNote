@@ -19,6 +19,9 @@ import {
 } from './token-policy.js';
 import { clientIpOf, evaluateAccess, isPrivateRequest, validateAllowedIps } from './network.js';
 import { makeDiff, toUnified } from './diff.js';
+import { registerAdminUsers } from './admin-users.js';
+import { WorkspaceOwnershipError } from './workspace-policy.js';
+import { proxyAiChat } from './ai-chat.js';
 import {
   createSessionToken,
   hashPassword,
@@ -84,8 +87,8 @@ export interface ApiTokenData {
   folderScope: string[] | null;
 }
 
-type AuthRequest = Request & {
-  user?: { id: string; username: string };
+export type AuthRequest = Request & {
+  user?: { id: string; username: string; role: 'admin' | 'user'; legacyOwner?: boolean };
   sessionToken?: string;
   authMethod?: 'session' | 'api_token';
   apiToken?: ApiTokenData;
@@ -155,7 +158,7 @@ async function authenticate(req: AuthRequest, res: Response, next: NextFunction)
     if (bearerToken.length >= 20) {
       const tokenHash = hashSessionToken(bearerToken);
       const tokenResult = await pool.query(
-        `SELECT u.id, u.username, t.id as token_id, t.name, t.permissions,
+        `SELECT u.id, u.username, u.role, t.id as token_id, t.name, t.permissions,
                 t.allowed_folder_ids as "allowedFolderIds",
                 t.denied_tag_ids as "deniedTagIds",
                 t.auto_tag_id as "autoTagId",
@@ -175,7 +178,7 @@ async function authenticate(req: AuthRequest, res: Response, next: NextFunction)
           const access = evaluateAccess(requestFacts(req), allowedIps, PRIVATE_TOKEN_HOSTS);
           if (access.kind === 'denied') return res.status(403).json({ error: networkDeniedMessage(access.ip) });
         }
-        req.user = { id: row.id, username: row.username };
+        req.user = { id: row.id, username: row.username, role: row.role };
         req.authMethod = 'api_token';
         req.apiToken = {
           id: row.token_id,
@@ -201,11 +204,16 @@ async function authenticate(req: AuthRequest, res: Response, next: NextFunction)
   const token = req.cookies?.[SESSION_COOKIE];
   if (typeof token !== 'string' || token.length < 20) return res.status(401).json({ error: 'Authentification requise' });
   const result = await pool.query(
-    `SELECT u.id, u.username FROM sessions s JOIN users u ON u.id=s.user_id
+    `SELECT u.id, u.username, u.role, (u.id=(SELECT id FROM users ORDER BY created_at,id LIMIT 1)) as "legacyOwner"
+     FROM sessions s JOIN users u ON u.id=s.user_id
      WHERE s.token_hash=$1 AND s.expires_at>now() AND u.disabled_at IS NULL`,
     [hashSessionToken(token)],
   );
   if (!result.rowCount) return res.status(401).json({ error: 'Session expirée' });
+  const expectedUser = req.get('x-mansot-user');
+  if (expectedUser && expectedUser !== result.rows[0].id) {
+    return res.status(409).json({ error: 'Le compte connecté a changé. Rechargez la page.' });
+  }
   req.user = result.rows[0]; req.sessionToken = token; req.authMethod = 'session';
   await pool.query('UPDATE sessions SET last_seen_at=now() WHERE token_hash=$1', [hashSessionToken(token)]);
   next();
@@ -218,9 +226,11 @@ const dataLimiter = rateLimit({ windowMs: 60_000, limit: 240, standardHeaders: t
 const ragLimiter = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: true, legacyHeaders: false });
 // Générations IA : limite dédiée pour empêcher un token volé de saturer le GPU.
 const aiLimiter = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: true, legacyHeaders: false });
+const adminLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
+registerAdminUsers(app, authenticate, adminLimiter);
 
 const ALLOWED_AI_MODELS = new Set(
-  (process.env.ALLOWED_AI_MODELS || 'qwen3.8:9b-q6-32k')
+  (process.env.ALLOWED_AI_MODELS || 'gemma4:e4b,qwen3.8:9b-q6-32k')
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean),
@@ -273,18 +283,21 @@ app.get('/health', async (_req, res) => {
 app.post('/auth/login', loginLimiter, async (req, res) => {
   const parsed = credentialsSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Identifiants invalides' });
-  const result = await pool.query(
-    'SELECT id,username,password_hash FROM users WHERE username_normalized=$1 AND disabled_at IS NULL',
-    [normalizeUsername(parsed.data.username)],
-  );
-  const user = result.rows[0];
-  if (!user || !(await verifyPassword(parsed.data.password, user.password_hash))) {
-    return res.status(401).json({ error: 'Identifiant ou mot de passe incorrect' });
-  }
   const token = createSessionToken();
   const client = await pool.connect();
+  let user;
   try {
     await client.query('BEGIN');
+    const result = await client.query(
+      `SELECT id,username,role,password_hash,(id=(SELECT id FROM users ORDER BY created_at,id LIMIT 1)) as "legacyOwner"
+       FROM users WHERE username_normalized=$1 AND disabled_at IS NULL FOR UPDATE`,
+      [normalizeUsername(parsed.data.username)],
+    );
+    user = result.rows[0];
+    if (!user || !(await verifyPassword(parsed.data.password, user.password_hash))) {
+      await client.query('ROLLBACK');
+      return res.status(401).json({ error: 'Identifiant ou mot de passe incorrect' });
+    }
     await client.query('DELETE FROM sessions WHERE expires_at<=now()');
     await client.query(
       `INSERT INTO sessions(user_id,token_hash,expires_at,ip,user_agent)
@@ -304,7 +317,7 @@ app.post('/auth/login', loginLimiter, async (req, res) => {
     throw error;
   } finally { client.release(); }
   res.cookie(SESSION_COOKIE, token, { httpOnly: true, secure: isProduction, sameSite: 'strict', path: '/', maxAge: SESSION_DAYS * 86400000 });
-  res.json({ user: { id: user.id, username: user.username } });
+  res.json({ user: { id: user.id, username: user.username, role: user.role, legacyOwner: user.legacyOwner } });
 });
 
 app.post('/auth/logout', authenticate, async (req: AuthRequest, res) => {
@@ -351,6 +364,7 @@ app.get('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) =
 
 app.put('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) => {
   if (!requireSession(req, res)) return;
+  if (req.get('x-mansot-user') !== req.user!.id) return res.status(409).json({ error: 'Rechargez la page avant de sauvegarder cet espace personnel' });
   const parsed = workspaceSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Workspace invalide' });
   const { state, expectedVersion } = parsed.data;
@@ -381,7 +395,13 @@ app.put('/workspace', dataLimiter, authenticate, async (req: AuthRequest, res) =
     // en cause la sauvegarde PostgreSQL déjà commitée.
     enqueueWorkspaceIndex(req.user!.id, state, nextVersion);
     res.json({ version: nextVersion });
-  } catch (error) { await client.query('ROLLBACK'); throw error; }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error instanceof WorkspaceOwnershipError || ['23514', '23505'].includes((error as { code?: string }).code ?? '')) {
+      return res.status(400).json({ error: 'Identifiant ou référence invalide dans cet espace personnel' });
+    }
+    throw error;
+  }
   finally { client.release(); }
 });
 
@@ -1252,12 +1272,34 @@ app.post(['/api/v1/media/upload', '/v1/media/upload'], authenticate, async (req:
       return res.status(502).json({ error: 'Échec de stockage Supabase', details: errText });
     }
 
-    const publicUrl = `/storage/v1/object/public/mansotnote-media/${objectPath}`;
-    res.json({ url: publicUrl, path: objectPath, filename });
+    const url = `/api/media/${objectPath}`;
+    res.json({ url, path: objectPath, filename });
   } catch (err: any) {
     console.error('[media] Erreur upload:', err);
     res.status(500).json({ error: err.message || 'Erreur interne upload' });
   }
+});
+
+// Lecture des images via une session du propriétaire, même pour les anciennes
+// URL /storage/ réécrites par Nginx. Aucun objet d'un autre compte n'est demandé.
+app.get('/media/:userId/:filename', authenticate, async (req: AuthRequest, res) => {
+  if (!requireSession(req, res)) return;
+  const filename = req.params.filename as string;
+  if (req.params.userId !== req.user!.id || !/^[a-zA-Z0-9._-]+$/.test(filename) || filename === '.' || filename === '..') {
+    return res.status(404).end();
+  }
+  const storageUrl = process.env.SUPABASE_STORAGE_URL || 'http://supabase-storage:5000';
+  const storageKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!storageKey) return res.status(503).json({ error: 'Stockage des images non configuré' });
+  try {
+    const response = await fetch(`${storageUrl}/object/authenticated/mansotnote-media/${req.user!.id}/${encodeURIComponent(filename)}`, {
+      headers: { Authorization: `Bearer ${storageKey}`, apikey: storageKey }, signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) return res.status(response.status === 404 ? 404 : 502).end();
+    res.set('Cache-Control', 'private, no-store');
+    res.set('Content-Type', response.headers.get('content-type') || 'application/octet-stream');
+    res.send(Buffer.from(await response.arrayBuffer()));
+  } catch { res.status(502).json({ error: 'Image indisponible' }); }
 });
 
 // ==========================================
@@ -1265,7 +1307,7 @@ app.post(['/api/v1/media/upload', '/v1/media/upload'], authenticate, async (req:
 // ==========================================
 app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req: AuthRequest, res) => {
   const parsed = z.object({
-    model: z.string().trim().min(1).max(120).default('qwen3.8:9b-q6-32k'),
+    model: z.string().trim().min(1).max(120).default('gemma4:e4b'),
     messages: z.array(z.object({
       role: z.enum(['system', 'user', 'assistant']),
       content: z.string().max(50_000),
@@ -1284,135 +1326,12 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
     return res.status(400).json({ error: 'Historique de messages trop volumineux (120k caractères max)' });
   }
 
-  // Interrompt immédiatement le calcul Ollama si le client se déconnecte ou annule
-  const abortController = new AbortController();
-  req.on('close', () => {
-    if (!res.writableEnded) abortController.abort();
+  await proxyAiChat(req, res, parsed.data, {
+    ollamaHost: OLLAMA_HOST,
+    ollamaNumCtx: OLLAMA_NUM_CTX,
+    llamaChatUrl: process.env.LLAMA_CHAT_URL,
+    llamaChatModel: process.env.LLAMA_CHAT_MODEL,
   });
-  const timeoutSignal = AbortSignal.timeout(600_000);
-  const fetchSignal = 'any' in AbortSignal
-    ? AbortSignal.any([timeoutSignal, abortController.signal])
-    : abortController.signal;
-
-  // Streaming : on relaie la NDJSON d'Ollama en SSE compatible OpenAI
-  // (data: {choices:[{delta:{content}}]}… puis data: [DONE]). Sans ça le
-  // client attendrait toute la génération avant le premier byte.
-  if (parsed.data.stream) {
-    try {
-      const aiRes = await fetch(`${OLLAMA_HOST}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: parsed.data.model,
-          messages: parsed.data.messages,
-          stream: true,
-          ...(parsed.data.think !== undefined ? { think: parsed.data.think } : {}),
-          keep_alive: -1,
-          options: {
-            temperature: parsed.data.temperature,
-            num_ctx: OLLAMA_NUM_CTX,
-            ...(parsed.data.max_tokens ? { num_predict: parsed.data.max_tokens } : {}),
-          },
-        }),
-        signal: fetchSignal,
-      });
-
-      if (!aiRes.ok || !aiRes.body) {
-        const err = await aiRes.json().catch(() => ({}));
-        return res.status(aiRes.status || 502).json({ error: err.error || 'Erreur du serveur IA' });
-      }
-
-      res.status(200);
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-      req.socket?.setNoDelay(true);
-      res.socket?.setNoDelay(true);
-      res.flushHeaders?.();
-
-      const reader = aiRes.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      const chunkId = `chatcmpl-${Date.now()}`;
-      const sendChunk = (delta: Record<string, unknown>) => {
-        res.write(`data: ${JSON.stringify({ id: chunkId, object: 'chat.completion.chunk', choices: [{ index: 0, delta }] })}\n\n`);
-        if (typeof (res as any).flush === 'function') {
-          (res as any).flush();
-        }
-      };
-      sendChunk({ role: 'assistant' });
-
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let newline: number;
-        while ((newline = buffer.indexOf('\n')) !== -1) {
-          const line = buffer.slice(0, newline).trim();
-          buffer = buffer.slice(newline + 1);
-          if (line === '') continue;
-          const event = JSON.parse(line) as {
-            message?: { role?: string; content?: string; thinking?: string };
-            done?: boolean;
-            error?: string;
-          };
-          if (event.error) {
-            res.write(`data: ${JSON.stringify({ error: { message: event.error } })}\n\n`);
-            continue;
-          }
-          if (event.message?.thinking) {
-            sendChunk({ reasoning_content: event.message.thinking });
-          }
-          if (event.message?.content) {
-            sendChunk({ content: event.message.content });
-          }
-          if (event.done) { sendChunk({}); res.write('data: [DONE]\n\n'); }
-        }
-      }
-      res.end();
-    } catch (error) {
-      if (!abortController.signal.aborted) {
-        console.error('[ai-proxy-stream] erreur:', error);
-      }
-      if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify({ error: { message: 'Flux IA interrompu' } })}\n\n`);
-        res.end();
-      }
-    }
-    return;
-  }
-
-  try {
-    const aiRes = await fetch(`${OLLAMA_HOST}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: parsed.data.model,
-        messages: parsed.data.messages,
-        stream: false,
-        ...(parsed.data.think !== undefined ? { think: parsed.data.think } : {}),
-        keep_alive: -1,
-        options: {
-          temperature: parsed.data.temperature,
-          num_ctx: OLLAMA_NUM_CTX,
-          ...(parsed.data.max_tokens ? { num_predict: parsed.data.max_tokens } : {}),
-        },
-      }),
-      signal: fetchSignal,
-    });
-
-    if (!aiRes.ok) {
-      const err = await aiRes.json().catch(() => ({}));
-      return res.status(aiRes.status).json({ error: err.error || 'Erreur du serveur IA' });
-    }
-
-    const data = (await aiRes.json()) as { message?: { content?: string } };
-    res.json({ choices: [{ message: { role: 'assistant', content: data.message?.content || '' } }] });
-  } catch (error) {
-    console.error('[ai-proxy] erreur:', error);
-    res.status(502).json({ error: 'Impossible de joindre le serveur IA local' });
-  }
 });
 
 app.post(['/api/v1/ai/embeddings', '/v1/ai/embeddings'], ragLimiter, authenticate, async (req: AuthRequest, res) => {
@@ -1741,12 +1660,15 @@ async function ensureAdmin(): Promise<void> {
   const exists = await pool.query('SELECT 1 FROM users WHERE username_normalized=$1', [normalized]);
   if (!exists.rowCount) {
     const passwordHash = await hashPassword(password);
-    await pool.query('INSERT INTO users(username,username_normalized,password_hash) VALUES($1,$2,$3)', [username, normalized, passwordHash]);
+    await pool.query("INSERT INTO users(username,username_normalized,password_hash,role) VALUES($1,$2,$3,'admin')", [username, normalized, passwordHash]);
     console.log(`[auth] compte initial créé: ${username}`);
   }
 }
 
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  if ((error as { code?: string }).code === '23514') {
+    return res.status(400).json({ error: 'Référence invalide dans cet espace personnel' });
+  }
   console.error('[api]', error instanceof Error ? error.message : error);
   res.status(500).json({ error: 'Erreur interne' });
 });
@@ -1769,4 +1691,4 @@ async function purgeOldVersions(): Promise<void> {
 }
 await purgeOldVersions();
 setInterval(() => void purgeOldVersions(), 24 * 60 * 60 * 1000).unref();
-app.listen(PORT, '0.0.0.0', () => console.log(`[api] écoute sur :${PORT}`));
+export const httpServer = app.listen(PORT, process.env.HOST || '0.0.0.0', () => console.log(`[api] écoute sur :${PORT}`));

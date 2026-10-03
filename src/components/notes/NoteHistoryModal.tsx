@@ -3,6 +3,7 @@
  * Liste des versions (auteur, date, message), diff ligne par ligne avec la version précédente ou la version actuelle,
  * et restauration d'une ancienne version (qui crée elle-même une version, donc s'annule).
  */
+import { accountFetch as fetch } from '@/lib/browser-user';
 import { useCallback, useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { Loader2, RotateCcw } from 'lucide-react';

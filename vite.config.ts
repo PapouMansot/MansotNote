@@ -14,6 +14,10 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: false,
+    proxy: process.env.MANSOTNOTE_DEV_API_URL ? {
+      '/storage/v1/object/public/mansotnote-media/': { target: process.env.MANSOTNOTE_DEV_API_URL, rewrite: (path) => path.replace(/^\/storage\/v1\/object\/public\/mansotnote-media\//, '/media/') },
+      '/api': { target: process.env.MANSOTNOTE_DEV_API_URL, rewrite: (path) => path.replace(/^\/api/, '') },
+    } : undefined,
   },
   build: {
     outDir: 'dist',

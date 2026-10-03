@@ -309,7 +309,10 @@ export function createNotesActions(set: StoreSet, get: StoreGet) {
         const notes = s.data.notes.map((n) =>
           n.folderId === id ? { ...n, folderId: null } : n,
         );
-        return { data: { ...s.data, folders, notes } };
+        return { data: {
+          ...s.data, folders, notes,
+          settings: { ...s.data.settings, defaultFolderId: s.data.settings.defaultFolderId === id ? null : s.data.settings.defaultFolderId },
+        } };
       });
       schedulePersist(set, get);
     },

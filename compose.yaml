@@ -56,12 +56,18 @@ services:
       INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
       SESSION_DAYS: 30
+      # Ollama reste le backend embeddings et du modèle Qwen secondaire.
       OLLAMA_URL: http://ollama:11434/v1
+      # Gemma conserve son alias existant : aucun réglage des coffres à migrer.
+      LLAMA_CHAT_URL: http://llama-gemma:8080/v1
+      LLAMA_CHAT_MODEL: gemma4:e4b
       # Contexte du 9B, aligné sur le modèle tel que chargé en prod (32k) :
       # sans num_ctx, une recharge éventuelle retomberait sur le défaut
       # Ollama (4096 tokens) et tronquerait les prompts du copilote.
       OLLAMA_NUM_CTX: 32768
-      ALLOWED_AI_MODELS: qwen3.8:9b-q6-32k
+      # Gemma 4 E4B est le modèle principal. Le Qwen distillé reste disponible
+      # comme solution secondaire pour les comparaisons et les besoins ciblés.
+      ALLOWED_AI_MODELS: gemma4:e4b,qwen3.8:9b-q6-32k
       EMBEDDING_MODEL: qwen3-embedding:0.6b-8k
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
@@ -76,7 +82,7 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_AI_ENDPOINT: "/api/v1/ai"
-        VITE_AI_MODEL: "qwen3.8:9b-q6-32k"
+        VITE_AI_MODEL: "gemma4:e4b"
         VITE_AI_EMBEDDING_MODEL: "qwen3-embedding:0.6b-8k"
     image: mansotnote:latest
     container_name: mansotnote
