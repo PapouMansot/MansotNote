@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import clsx from 'clsx';
 import {
+  Bot,
   Check,
   Copy,
   Folder as FolderIcon,
@@ -23,6 +24,7 @@ import { NoteTrashPanel } from '@/components/notes/NoteTrashPanel';
 import type { Folder, Tag } from '@/types';
 import { getBrowserUser, accountFetch as fetch } from '@/lib/browser-user';
 import { UsersPanel } from './UsersPanel';
+import { McpConnectPanel } from './McpConnectPanel';
 
 interface ApiToken {
   id: string;
@@ -278,7 +280,7 @@ function TokenPolicyFields({ draft, onChange, folders, tags, folderLabel }: Fiel
 }
 
 export function ServerAccountModal({ onClose }: { onClose: () => void }) {
-  const [activeTab, setActiveTab] = useState<'security' | 'tokens' | 'trash' | 'users'>('tokens');
+  const [activeTab, setActiveTab] = useState<'mcp' | 'security' | 'tokens' | 'trash' | 'users'>('mcp');
   const user = getBrowserUser();
 
   const folders = useAppStore((s) => s.data.folders);
@@ -429,7 +431,7 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const tabClass = (tab: 'tokens' | 'security' | 'trash' | 'users') =>
+  const tabClass = (tab: 'mcp' | 'tokens' | 'security' | 'trash' | 'users') =>
     clsx(
       'flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold',
       activeTab === tab
@@ -440,6 +442,10 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
   return (
     <Modal title={`Compte & Accès distant${user ? ' · ' + user.username : ''}`} onClose={onClose} wide={activeTab === 'users'}>
       <div className="mb-4 flex flex-wrap border-b border-zinc-200 dark:border-zinc-800">
+        <button type="button" onClick={() => setActiveTab('mcp')} className={tabClass('mcp')}>
+          <Bot size={14} />
+          <span>Connecter une IA</span>
+        </button>
         <button type="button" onClick={() => setActiveTab('tokens')} className={tabClass('tokens')}>
           <Key size={14} />
           <span>Jetons API & Bots (Hermès / Mia)</span>
@@ -455,7 +461,15 @@ export function ServerAccountModal({ onClose }: { onClose: () => void }) {
         {user?.role === 'admin' && <button type="button" onClick={() => setActiveTab('users')} className={tabClass('users')}><Users size={14} /><span>Utilisateurs</span></button>}
       </div>
 
-      {activeTab === 'tokens' ? (
+      {activeTab === 'mcp' ? (
+        <McpConnectPanel
+          folders={folders}
+          folderLabel={folderLabel}
+          myIp={myIp}
+          onTokensChanged={() => void fetchTokens()}
+          onOpenTokens={() => setActiveTab('tokens')}
+        />
+      ) : activeTab === 'tokens' ? (
         <div className="space-y-4">
           <p className="text-xs text-zinc-500">
             Un jeton par bot ou service (Hermès, Mia, extension). Choisissez les dossiers accessibles, les tags interdits et le tag

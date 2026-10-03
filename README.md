@@ -36,6 +36,12 @@ Conçu pour un usage auto-hébergé respectueux de la vie privée (Zero-Knowledg
 - Une désactivation conserve les données, déconnecte les sessions et bloque les jetons. Une réinitialisation du mot de passe déconnecte les sessions et conserve les jetons API.
 - Les conversations SIA restent dans le navigateur, avec un historique distinct par compte. La reprise de l'ancien coffre et des conversations historiques est réservée au premier compte.
 - Les images sont servies uniquement à leur propriétaire connecté. La migration `010_private_media.sql` rend privé le bucket Supabase `mansotnote-media` ; Nginx conserve la compatibilité des anciennes adresses d'images.
+
+### 🔌 Connecter un assistant IA (serveur MCP intégré)
+- L'onglet **Compte & Accès distant → Connecter une IA** crée un jeton personnel en quelques clics (nom, dossiers accessibles, écriture facultative, IP autorisée) et affiche une fois l'adresse du serveur MCP, l'en-tête `Authorization` et des exemples de configuration (Hermès, fichier JSON, `curl`). Chaque utilisateur peut créer plusieurs connexions et les régler ensuite dans **Jetons API & Bots**, comme n'importe quel jeton.
+- Le serveur MCP est servi par l'API : `POST /api/mcp` (sans état, réponses JSON), avec `Authorization: Bearer <jeton>`. Les cookies de session sont refusés. Chaque outil appelle l'API avec le jeton de l'appelant : dossiers autorisés, tags interdits, écriture, suppression et règle réseau (réseau privé / VPN, ou IP enregistrée sur le jeton) s'appliquent donc exactement comme pour l'API REST.
+- Les outils de gestion des jetons ne sont jamais exposés à distance ; les outils d'écriture ne sont proposés qu'aux jetons qui ont le droit d'écrire. Les outils sont définis dans `server/mcp-tools.ts` (même définition que le script MCP local).
+- Un client hébergé chez un fournisseur (connecteur en ligne) appelle depuis ses propres adresses, qui changent : la restriction par IP ne s'y prête pas. Utiliser un client qui tourne sur une machine à IP fixe ou derrière le VPN.
 - Déploiement conteneurisé Docker Compose (Base de données PostgreSQL 16 + `pgvector`, API backend Node.js, Frontend statique Nginx).
 - Sauvegarde automatisée de la base de données.
 - Support du reverse proxy avec terminaison SSL Let's Encrypt.

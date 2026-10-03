@@ -5,6 +5,8 @@ import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { build } from 'esbuild';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { PGlite } from '@electric-sql/pglite';
 import { vector } from '@electric-sql/pglite-pgvector';
 import { createTestPool } from './pglite-test-pool.mjs';
@@ -184,6 +186,81 @@ try {
   assert.equal((await request('/v1/notes/bob-note', null, 'GET', undefined, tokenHeaders)).status, 404);
   assert.equal((await request('/rag/search', null, 'POST', { query: 'secret' }, tokenHeaders)).body.results[0].note_id, 'alice-note');
   check('Jetons personnels, sans administration ni accès global au workspace');
+
+  // --- MCP distant : même jeton, mêmes droits, mêmes frontières entre comptes ---
+  const mcpHeaders = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
+  const mcp = async (bearer, method, params, extras = {}) => {
+    const response = await fetch(base + '/mcp', { method: 'POST', headers: { ...mcpHeaders, ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}), ...extras },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+    const raw = await response.text();
+    let body = null; try { body = JSON.parse(raw); } catch { /* corps non JSON */ }
+    return { status: response.status, body };
+  };
+  const toolNames = (r) => r.body.result.tools.map((t) => t.name);
+  const callTool = async (bearer, name, args = {}, extras) => {
+    const r = await mcp(bearer, 'tools/call', { name, arguments: args }, extras);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    return { isError: Boolean(r.body.result.isError), text: r.body.result.content[0].text };
+  };
+  const mcpInit = { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'test', version: '1' } };
+  assert.equal((await mcp(null, 'initialize', mcpInit)).status, 401);
+  const sessionOnly = await fetch(base + '/mcp', { method: 'POST', headers: { ...mcpHeaders, Cookie: alice.cookie, 'X-Mansot-User': alice.user.id },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
+  assert.equal(sessionOnly.status, 401);
+  assert.equal((await fetch(base + '/mcp', { headers: { Authorization: `Bearer ${token.body.token}` } })).status, 405);
+  const init = await mcp(token.body.token, 'initialize', mcpInit);
+  assert.equal(init.status, 200, JSON.stringify(init.body));
+  assert.equal(init.body.result.serverInfo.name, 'mansotnote');
+  const aliceTools = toolNames(await mcp(token.body.token, 'tools/list', {}));
+  assert.ok(aliceTools.includes('mansotnote_search') && aliceTools.includes('mansotnote_create_note'));
+  assert.ok(!aliceTools.some((name) => /token/.test(name)), 'aucun outil de gestion des jetons à distance');
+  check('MCP distant : jeton Bearer obligatoire (ni cookie, ni anonyme), sans outils de gestion des jetons');
+
+  const aliceNotes = await callTool(token.body.token, 'mansotnote_list_notes');
+  assert.ok(aliceNotes.text.includes('alice-note') && !aliceNotes.text.includes('bob-note'));
+  const bobToken = await request('/tokens', bob, 'POST', { name: 'bob-bot', permissions: { read: true, write: false } });
+  assert.equal(bobToken.status, 201, JSON.stringify(bobToken.body));
+  const bobNotes = await callTool(bobToken.body.token, 'mansotnote_list_notes');
+  assert.ok(bobNotes.text.includes('bob-note') && !bobNotes.text.includes('alice-note'));
+  const crossRead = await callTool(token.body.token, 'mansotnote_get_note', { id: 'bob-note' });
+  assert.ok(crossRead.isError && /introuvable/i.test(crossRead.text), crossRead.text);
+  const aliceSearch = await callTool(token.body.token, 'mansotnote_search', { query: 'secret' });
+  assert.ok(aliceSearch.text.includes('alice-note') && !aliceSearch.text.includes('bob-note'));
+  check('MCP distant : chaque jeton ne voit que les notes de son compte (liste, lecture, recherche)');
+
+  const bobTools = toolNames(await mcp(bobToken.body.token, 'tools/list', {}));
+  assert.ok(bobTools.includes('mansotnote_list_notes') && !bobTools.includes('mansotnote_create_note'));
+  const created = await callTool(token.body.token, 'mansotnote_create_note', { title: 'Via MCP', content: 'créée par le bot', message: 'test MCP' });
+  assert.ok(!created.isError, created.text);
+  const createdId = JSON.parse(created.text).id;
+  const history = await request(`/v1/notes/${createdId}/versions`, null, 'GET', undefined, tokenHeaders);
+  assert.equal(history.body.versions[0].actor, 'bot:alice-bot');
+  assert.equal((await request(`/v1/notes/${createdId}`, bob)).status, 404);
+  const refusedDelete = await callTool(token.body.token, 'mansotnote_delete_note', { id: createdId });
+  assert.ok(refusedDelete.isError && /HTTP 403/.test(refusedDelete.text), refusedDelete.text);
+  assert.equal((await request(`/v1/notes/${createdId}`, alice, 'DELETE')).status, 204);
+  check('MCP distant : lecture seule sans outil d\'écriture, écriture tracée au nom du jeton, suppression refusée sans droit');
+
+  // Règle réseau : une requête arrivée par l'extérieur n'est acceptée qu'avec une IP enregistrée, y compris pour
+  // les appels internes que fait chaque outil.
+  const fromIp = (ip) => ({ 'CF-Connecting-IP': ip, 'X-Forwarded-For': `${ip}, 173.245.48.1` });
+  assert.equal((await mcp(token.body.token, 'tools/list', {}, fromIp('93.184.216.34'))).status, 403);
+  const ipToken = await request('/tokens', alice, 'POST', { name: 'alice-ip', permissions: { read: true, write: false }, allowedIps: ['93.184.216.34'] });
+  assert.equal(ipToken.status, 201, JSON.stringify(ipToken.body));
+  const fromAllowed = await callTool(ipToken.body.token, 'mansotnote_list_notes', {}, fromIp('93.184.216.34'));
+  assert.ok(!fromAllowed.isError && fromAllowed.text.includes('alice-note'), fromAllowed.text);
+  assert.equal((await mcp(ipToken.body.token, 'tools/list', {}, fromIp('93.184.216.35'))).status, 403);
+  check('MCP distant : règle réseau appliquée (IP enregistrée requise hors réseau privé), appels internes compris');
+
+  // Client MCP officiel du SDK : poignée de main, liste des outils, appel d'un outil, comme un vrai agent.
+  const sdkClient = new Client({ name: 'test-agent', version: '1.0.0' });
+  await sdkClient.connect(new StreamableHTTPClientTransport(new URL(base + '/mcp'), { requestInit: { headers: { Authorization: `Bearer ${token.body.token}` } } }));
+  const sdkTools = await sdkClient.listTools();
+  assert.ok(sdkTools.tools.length >= 15 && sdkTools.tools.every((t) => t.name.startsWith('mansotnote_')));
+  const sdkResult = await sdkClient.callTool({ name: 'mansotnote_list_notes', arguments: {} });
+  assert.ok(sdkResult.content[0].text.includes('alice-note') && !sdkResult.content[0].text.includes('bob-note'));
+  await sdkClient.close();
+  check(`MCP distant : compatible avec le client officiel du SDK (${sdkTools.tools.length} outils pour un jeton en écriture)`);
 
   assert.equal((await request(`/admin/users/${alice.user.id}`, admin, 'PATCH', { disabled: true })).status, 200);
   assert.equal((await request('/workspace', alice)).status, 401);

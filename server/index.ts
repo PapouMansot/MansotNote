@@ -20,6 +20,7 @@ import {
 import { clientIpOf, evaluateAccess, isPrivateRequest, validateAllowedIps } from './network.js';
 import { makeDiff, toUnified } from './diff.js';
 import { registerAdminUsers } from './admin-users.js';
+import { registerMcp } from './mcp.js';
 import { WorkspaceOwnershipError } from './workspace-policy.js';
 import { proxyAiChat } from './ai-chat.js';
 import {
@@ -228,6 +229,9 @@ const ragLimiter = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: tru
 const aiLimiter = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: true, legacyHeaders: false });
 const adminLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
 registerAdminUsers(app, authenticate, adminLimiter);
+// Chaque appel d'outil MCP déclenche d'autres requêtes internes, déjà limitées par dataLimiter.
+const mcpLimiter = rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false });
+registerMcp(app, authenticate, mcpLimiter, PORT);
 
 const ALLOWED_AI_MODELS = new Set(
   (process.env.ALLOWED_AI_MODELS || 'gemma4:e4b,qwen3.8:9b-q6-32k')
