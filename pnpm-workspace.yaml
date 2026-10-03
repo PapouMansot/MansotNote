@@ -3,3 +3,5 @@
 # autorisation, le binaire manque et `vite build` échoue.
 allowBuilds:
   esbuild: true
+minimumReleaseAgeExclude:
+  - pdfjs-dist@6.4.299

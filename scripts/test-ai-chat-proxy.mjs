@@ -34,6 +34,34 @@ test('Gemma OpenAI: base URL, default thinking, tokens, separated reasoning and 
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).choices[0].message, { role: 'assistant', content: 'réponse', reasoning_content: 'pensée' });
 });
+test('multimodal messages preserve OpenAI parts and map Ollama images separately', async t => {
+  const image = `data:image/png;base64,${Buffer.alloc(4, 7).toString('base64')}`;
+  const messages = [{ role: 'user', content: [{ type: 'text', text: 'Describe' }, { type: 'image_url', image_url: { url: image } }] }];
+  const llama = await harness(t, async (_, init) => {
+    assert.deepEqual(JSON.parse(init.body).messages, messages);
+    return Response.json({ choices: [{ message: { content: 'ok' } }] });
+  });
+  assert.equal((await post(llama, { messages })).status, 200);
+  const ollama = await harness(t, async (_, init) => {
+    assert.deepEqual(JSON.parse(init.body).messages, [{ role: 'user', content: 'Describe', images: [Buffer.alloc(4, 7).toString('base64')] }]);
+    return Response.json({ message: { content: 'ok' } });
+  }, { ...config, llamaChatUrl: '' });
+  assert.equal((await post(ollama, { model: 'qwen3.8:9b-q6-32k', messages })).status, 200);
+});
+test('multimodal input validation rejects malformed data URLs, oversized images and excessive history', async () => {
+  const built = await build({ entryPoints: ['server/ai-chat-input.ts'], bundle: true, platform: 'node', format: 'esm', write: false });
+  const { chatMessagesSchema } = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
+  const validImage = `data:image/webp;base64,${Buffer.alloc(3).toString('base64')}`;
+  const message = (url) => [{ role: 'user', content: [{ type: 'image_url', image_url: { url } }] }];
+  assert.equal(chatMessagesSchema.safeParse(message(validImage)).success, true);
+  for (const url of ['data:image/svg+xml;base64,AAAA', 'data:image/png;base64,%%%=', 'data:image/jpeg;base64,']) assert.equal(chatMessagesSchema.safeParse(message(url)).success, false);
+  assert.equal(chatMessagesSchema.safeParse(message(`data:image/png;base64,${Buffer.alloc(4 * 1024 * 1024 + 1).toString('base64')}`)).success, false);
+  const four = [{ role: 'user', content: Array.from({ length: 4 }, () => ({ type: 'image_url', image_url: { url: validImage } })) }];
+  assert.equal(chatMessagesSchema.safeParse(four).success, true);
+  assert.equal(chatMessagesSchema.safeParse([{ role: 'user', content: [...four[0].content, { type: 'image_url', image_url: { url: validImage } }] }]).success, false);
+  assert.equal(chatMessagesSchema.safeParse([{ role: 'user', content: 'x'.repeat(50_001) }]).success, false);
+  assert.equal(chatMessagesSchema.safeParse([{ role: 'user', content: 'x'.repeat(50_000) }, { role: 'assistant', content: 'x'.repeat(50_000) }, { role: 'user', content: 'x'.repeat(20_001) }]).success, false);
+});
 test('Gemma SSE: fragmented UTF-8 / CRLF / reasoning / DONE', async t => {
   const events = [{ choices: [{ delta: { reasoning_content: 'réflexion' } }] }, { choices: [{ delta: { content: 'été' }, finish_reason: 'stop' }] }];
   const url = await harness(t, async (_, init) => {
@@ -115,6 +143,6 @@ test('Server-only llama alias does not alter Ollama model routing', async t => {
 });
 test('Route protections and embeddings routing stay present', () => {
   const source = readFileSync('server/index.ts', 'utf8');
-  assert.match(source, /aiLimiter, authenticate/); assert.match(source, /isAllowedAiModel\(parsed.data.model\)/); assert.match(source, /totalChars > 120_000/);
+  assert.match(source, /aiLimiter, authenticate/); assert.match(source, /isAllowedAiModel\(parsed.data.model\)/); assert.match(source, /chatMessagesSchema/);
   assert.match(source, /\$\{OLLAMA_HOST\}\/v1\/embeddings/);
 });

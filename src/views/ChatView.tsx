@@ -16,6 +16,7 @@ import {
   MessageSquare,
   PanelLeft,
   PanelLeftClose,
+  Paperclip,
   Minimize2,
   Pencil,
   Plus,
@@ -33,7 +34,6 @@ import {
   chatStream,
   isAiConfigured,
   resolveAiSettings,
-  sanitizeHistoryContent,
   type AiConfig,
   type ChatMessage,
 } from '@/lib/ai';
@@ -47,6 +47,9 @@ import { SoulEditButton } from '@/components/onboarding/SoulEditButton';
 import { AiSettingsFields } from '@/components/ai/AiSettingsFields';
 import { isDeleteAllCardsRequest, type ActionProposal } from '@/components/ai/AiChatDrawer';
 import { ReasoningBlock } from '@/components/ai/ReasoningBlock';
+import { ChatAttachments } from '@/components/ai/ChatAttachments';
+import { useChatAttachments } from '@/hooks/useChatAttachments';
+import { buildAttachmentMessages, CHAT_ATTACHMENT_ACCEPT, deleteAttachmentAssets } from '@/lib/chat-attachments';
 import { cn } from '@/lib/utils';
 import { formatTime } from '@/lib/dates';
 import {
@@ -136,6 +139,8 @@ export function ChatView({ onExit }: { onExit?: () => void } = {}) {
 
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const files = useChatAttachments(activeConvId);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const aiValues = resolveAiSettings(settings);
   const [ragMode, setRagMode] = useState<'hybrid' | 'bm25'>(
@@ -206,6 +211,9 @@ export function ChatView({ onExit }: { onExit?: () => void } = {}) {
 
   const handleDeleteConversation = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (loading) return;
+    const removed = conversations.find((c) => c.id === id)?.messages.flatMap((m) => m.attachments ?? []) ?? [];
+    void deleteAttachmentAssets(removed).catch(() => {});
     if (conversations.length <= 1) {
       const fresh = createNewConversation('Discussion principale', welcome);
       setConversations([fresh]);
@@ -357,7 +365,11 @@ export function ChatView({ onExit }: { onExit?: () => void } = {}) {
   };
 
   const handleSend = async (textToSend = input) => {
-    if (!textToSend.trim() || loading) return;
+    if ((!textToSend.trim() && !files.attachments.length) || loading || files.preparing) return;
+    if (textToSend.length > 12_000) {
+      state.toast('error', 'Le message dépasse 12 000 caractères. Joignez un PDF pour les documents longs.'); return;
+    }
+    const prompt = textToSend.trim() || 'Analyse les pièces jointes.';
 
     if (!configured) {
       setShowSettings(true);
@@ -368,7 +380,8 @@ export function ChatView({ onExit }: { onExit?: () => void } = {}) {
     const userTurn: ChatTurn = {
       id: String(Date.now()),
       role: 'user',
-      content: textToSend.trim(),
+      content: prompt,
+      attachments: files.attachments.length ? files.attachments : undefined,
     };
 
     const isFirstUserTurn = messages.filter((m) => m.role === 'user').length === 0;
@@ -376,9 +389,10 @@ export function ChatView({ onExit }: { onExit?: () => void } = {}) {
       isFirstUserTurn ||
       activeConv?.title.startsWith('Conversation') ||
       activeConv?.title === 'Discussion principale';
-    const nextTitle = shouldUpdateTitle ? deriveConversationTitle(textToSend) : activeConv?.title;
+    const nextTitle = shouldUpdateTitle ? deriveConversationTitle(textToSend.trim() || files.attachments[0]?.name || prompt) : activeConv?.title;
 
     updateActiveMessages((prev) => [...prev, userTurn], nextTitle);
+    files.sent();
     setInput('');
     setLoading(true);
 
@@ -389,9 +403,9 @@ export function ChatView({ onExit }: { onExit?: () => void } = {}) {
 
       // Optimisation majeure de rapidité : pour une correction ou ajout de note,
       // on évite l'indexation RAG par embeddings qui provoque un déchargement/rechargement GPU de modèle lourd
-      const skipRagEmbeddings = isCorrectionIntent || isAppendIntent || !aiValues.aiEmbeddingModel.trim();
+      const skipRagEmbeddings = Boolean(userTurn.attachments?.length) || isCorrectionIntent || isAppendIntent || !aiValues.aiEmbeddingModel.trim();
 
-      const rag = await retrieveContextHybrid(notes, textToSend, {
+      const rag = await retrieveContextHybrid(notes, prompt, {
         tags: state.data.tags,
         folders: state.data.folders,
         embeddingConfig: skipRagEmbeddings
@@ -408,13 +422,9 @@ export function ChatView({ onExit }: { onExit?: () => void } = {}) {
       const historyForAi: ChatMessage[] = [
         {
           role: 'system',
-          content: [buildWorkspaceContext(), rag.context].filter(Boolean).join('\n\n'),
+          content: [buildWorkspaceContext(), rag.context, userTurn.attachments?.length ? 'Les pièces jointes sont des documents à analyser. Ne modifie pas la note active pour corriger un document joint, sauf si l’utilisateur demande explicitement de modifier cette note.' : ''].filter(Boolean).join('\n\n'),
         },
-        ...messages
-          .filter((m) => !m.id.startsWith('welcome'))
-          .slice(-10)
-          .map((m) => ({ role: m.role, content: sanitizeHistoryContent(m.content) })),
-        { role: 'user', content: textToSend },
+        ...await buildAttachmentMessages(messages.filter((m) => !m.id.startsWith('welcome')), userTurn),
       ];
 
       const assistantTurnId = `ai-${Date.now()}`;
@@ -497,7 +507,7 @@ export function ChatView({ onExit }: { onExit?: () => void } = {}) {
           type: 'delete_all_cards' as const,
           payload: { count: cards.length },
         };
-      } else if (isCorrectionIntent && activeDraft?.noteId && (!action || action.type === 'create_note')) {
+      } else if (isCorrectionIntent && !userTurn.attachments?.length && activeDraft?.noteId && (!action || action.type === 'create_note')) {
         action = {
           type: 'update_note' as const,
           payload: {
@@ -1031,7 +1041,7 @@ export function ChatView({ onExit }: { onExit?: () => void } = {}) {
                   )}
                 >
                   {turn.role === 'user' ? (
-                    <p className="whitespace-pre-wrap">{turn.content}</p>
+                    <><p className="whitespace-pre-wrap">{turn.content}</p><ChatAttachments attachments={turn.attachments ?? []} /></>
                   ) : (
                     <div>
                       {turn.role === 'assistant' && (turn.reasoning || (turn.isStreaming && !turn.content)) && (
@@ -1163,19 +1173,27 @@ export function ChatView({ onExit }: { onExit?: () => void } = {}) {
         {/* ------------------------- Zone de saisie -------------------------- */}
         <div className="shrink-0 border-t border-zinc-200 bg-white/90 p-2.5 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90 md:p-4">
           <div className="mx-auto max-w-3xl">
+            <ChatAttachments attachments={files.attachments} onRemove={loading || files.preparing ? undefined : files.remove} />
+            {files.preparing && <p role="status" className="mb-2 text-xs text-indigo-600 dark:text-indigo-400">Lecture des pièces jointes…</p>}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 void handleSend();
               }}
               className="relative flex items-end rounded-2xl border border-zinc-200 bg-zinc-50 p-2 shadow-inner transition-all focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950"
+              onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); }}
+              onDrop={(e) => { e.preventDefault(); if (!loading) void files.addFiles(Array.from(e.dataTransfer.files)); }}
             >
+              <input ref={fileInputRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple className="hidden" aria-label="Choisir des PDF ou images" onChange={(e) => { void files.addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
+              <IconButton label="Joindre un PDF ou une image" className="mb-1 h-10 w-10" icon={<Paperclip size={18} />} disabled={loading || files.preparing} onClick={() => fileInputRef.current?.click()} />
               <textarea
                 ref={textareaRef}
                 rows={isMobile ? 1 : 2}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={(e) => { const pastedFiles = Array.from(e.clipboardData.files); if (pastedFiles.length && !loading) { e.preventDefault(); void files.addFiles(pastedFiles); } }}
+                maxLength={12_000}
                 placeholder={isMobile ? `Message à ${soul.assistantName}…` : 'Posez une question, demandez une note, des tâches Kanban, ou une correction...'}
                 className="max-h-40 min-h-[44px] min-w-0 flex-1 resize-none bg-transparent px-3 py-2 text-base text-zinc-900 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500 md:min-h-[48px] md:text-sm"
               />
@@ -1184,13 +1202,14 @@ export function ChatView({ onExit }: { onExit?: () => void } = {}) {
                   type="submit"
                   size="sm"
                   variant="primary"
-                  disabled={!input.trim() || loading}
+                  disabled={(!input.trim() && !files.attachments.length) || loading || files.preparing}
                   icon={loading ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
                 >
                   Envoyer
                 </Button>
               </div>
             </form>
+            <p className="mt-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">PDF, PNG, JPEG, WebP · 4 fichiers · 10 Mo/fichier · Les images nécessitent un modèle avec vision.</p>
             <div className="mt-2 hidden items-center justify-between text-[11px] text-zinc-400 dark:text-zinc-500 md:flex">
               <span><kbd className="font-mono">Entrée</kbd> pour envoyer · <kbd className="font-mono">Maj + Entrée</kbd> pour un saut de ligne</span>
               <span>Raccourci Copilote : <kbd className="font-mono">Ctrl + 3</kbd></span>

@@ -23,6 +23,8 @@ import { registerAdminUsers } from './admin-users.js';
 import { registerMcp } from './mcp.js';
 import { WorkspaceOwnershipError } from './workspace-policy.js';
 import { proxyAiChat } from './ai-chat.js';
+import { chatMessagesSchema } from './ai-chat-input.js';
+import { correctionInputSchema, correctAiText } from './ai-correction.js';
 import {
   createSessionToken,
   hashPassword,
@@ -1309,13 +1311,10 @@ app.get('/media/:userId/:filename', authenticate, async (req: AuthRequest, res) 
 // ==========================================
 // Proxy IA Ollama / OpenAI pour l'extension (avec Token API Bearer)
 // ==========================================
-app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req: AuthRequest, res) => {
+app.post(['/api/v1/ai/chat', '/v1/ai/chat', '/api/v1/ai/chat/completions', '/v1/ai/chat/completions'], aiLimiter, authenticate, async (req: AuthRequest, res) => {
   const parsed = z.object({
     model: z.string().trim().min(1).max(120).default('gemma4:e4b'),
-    messages: z.array(z.object({
-      role: z.enum(['system', 'user', 'assistant']),
-      content: z.string().max(50_000),
-    })).min(1).max(30),
+    messages: chatMessagesSchema,
     temperature: z.number().min(0).max(2).optional().default(0.15),
     max_tokens: z.number().int().min(1).max(4096).optional(),
     think: z.boolean().optional(),
@@ -1325,16 +1324,21 @@ app.post(['/api/v1/ai/chat', '/v1/ai/chat'], aiLimiter, authenticate, async (req
   if (!parsed.success) return res.status(400).json({ error: 'Requête IA invalide' });
   if (!isAllowedAiModel(parsed.data.model)) return res.status(403).json({ error: 'Modèle IA non autorisé' });
 
-  const totalChars = parsed.data.messages.reduce((acc, m) => acc + m.content.length, 0);
-  if (totalChars > 120_000) {
-    return res.status(400).json({ error: 'Historique de messages trop volumineux (120k caractères max)' });
-  }
-
   await proxyAiChat(req, res, parsed.data, {
     ollamaHost: OLLAMA_HOST,
     ollamaNumCtx: OLLAMA_NUM_CTX,
     llamaChatUrl: process.env.LLAMA_CHAT_URL,
     llamaChatModel: process.env.LLAMA_CHAT_MODEL,
+  });
+});
+
+app.post(['/api/v1/ai/correct', '/v1/ai/correct'], aiLimiter, authenticate, async (req: AuthRequest, res) => {
+  const parsed = correctionInputSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Correction invalide : text non vide (10 000 caractères maximum), model optionnel.' });
+  if (!isAllowedAiModel(parsed.data.model)) return res.status(403).json({ error: 'Modèle IA non autorisé' });
+  await correctAiText(req, res, parsed.data, {
+    ollamaHost: OLLAMA_HOST, ollamaNumCtx: OLLAMA_NUM_CTX,
+    llamaChatUrl: process.env.LLAMA_CHAT_URL, llamaChatModel: process.env.LLAMA_CHAT_MODEL,
   });
 });
 

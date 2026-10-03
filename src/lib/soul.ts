@@ -145,6 +145,7 @@ export function buildSoulPrompt(soul: AssistantSoul): string {
   const preset = getPersonalityPreset(soul.personality);
   const lines: string[] = [];
   lines.push(`Tu t'appelles « ${soul.assistantName} ».`);
+  lines.push('Utilise ce nom choisi par l’utilisateur pour te présenter. Il remplace tout ancien nom présent dans l’historique de la conversation.');
   if (soul.userName !== '') {
     lines.push(`Appelle l'utilisateur « ${soul.userName} ».`);
   }

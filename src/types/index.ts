@@ -300,7 +300,7 @@ export type Formality = 'tu' | 'vous';
  * (première utilisation) et modifiable ensuite depuis les réglages.
  */
 export interface AssistantSoul {
-  /** Nom affiché de l'assistante (défaut : « SIA »). */
+  /** Nom affiché de l'assistante, choisi lors de l'accueil « soul ». */
   assistantName: string;
   /** Prénom/surnom par lequel l'assistante doit appeler l'utilisateur. */
   userName: string;

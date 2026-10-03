@@ -292,7 +292,7 @@ export default function App() {
       )}
       <main className={isMobile ? 'min-w-0 flex-1 pb-[calc(3.5rem+env(safe-area-inset-bottom))]' : 'min-w-0 flex-1'}>
         <ErrorBoundary label="Vue principale">
-          {view === 'notes' ? <NotesView /> : view === 'kanban' ? <KanbanView /> : <ChatView onExit={exitChat} />}
+          {view === 'notes' ? <NotesView /> : view === 'kanban' ? <KanbanView /> : <ChatView key={serverUser.id} onExit={exitChat} />}
         </ErrorBoundary>
       </main>
 
@@ -310,7 +310,7 @@ export default function App() {
       )}
 
       {/* Tiroir conversationnel IA */}
-      <AiChatDrawer open={chatOpen} onClose={() => setChatOpen(false)} />
+      <AiChatDrawer key={serverUser.id} open={chatOpen} onClose={() => setChatOpen(false)} />
       {isMobile && !chatOpen && (
         <MobileNav
           view={view}

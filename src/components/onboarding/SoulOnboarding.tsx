@@ -139,7 +139,7 @@ export function SoulOnboarding({ initial, onSave, onSkip, mode }: SoulOnboarding
                   ref={firstFieldRef}
                   className="field h-11 w-full px-3 text-base"
                   maxLength={SOUL_NAME_MAX_LENGTH}
-                  placeholder="SIA"
+                  placeholder="Choisissez un nom"
                   value={assistantName}
                   onChange={(e) => setAssistantName(e.target.value)}
                 />

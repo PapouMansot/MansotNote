@@ -77,6 +77,13 @@ test('getSoul : fusionne un soul partiel avec les défauts', () => {
   assert.equal(soul.completedAt, null);
 });
 
+test('getSoul : conserve le nom choisi dans les réglages persistés', () => {
+  const soul = getSoul({ soul: { ...DEFAULT_SOUL, assistantName: 'Ariane', completedAt: 1700000000000 } });
+  assert.equal(soul.assistantName, 'Ariane');
+  assert.ok(buildSoulPrompt(soul).includes('Tu t\'appelles « Ariane »'));
+  assert.ok(buildWelcomeMessage(soul).includes('Je suis **Ariane**'));
+});
+
 test('getSoul : nom vide ou trop long → repli / troncature à 40', () => {
   const soul = getSoul({ soul: { assistantName: '   ', userName: 'a'.repeat(100) } });
   assert.equal(soul.assistantName, DEFAULT_SOUL.assistantName, 'nom vide → défaut');

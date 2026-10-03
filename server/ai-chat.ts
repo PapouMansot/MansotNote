@@ -1,14 +1,15 @@
 import type { Request, Response } from 'express';
+import type { ChatMessage } from './ai-chat-input.js';
 
 export interface ChatInput {
   model: string;
-  messages: { role: 'system' | 'user' | 'assistant'; content: string }[];
+  messages: ChatMessage[];
   temperature: number;
   max_tokens?: number;
   think?: boolean;
   stream: boolean;
 }
-interface ChatBackendConfig {
+export interface ChatBackendConfig {
   ollamaHost: string;
   ollamaNumCtx: number;
   /** OpenAI API base, e.g. http://llama-gemma:8080/v1. Optional. */
@@ -51,10 +52,7 @@ async function* sseData(body: ReadableStream<Uint8Array>) {
   if (data.length) yield data.join('\n');
 }
 
-export async function proxyAiChat(
-  req: Request, res: Response, input: ChatInput, config: ChatBackendConfig,
-  fetchUpstream: typeof fetch = fetch,
-): Promise<void> {
+export function chatBackendRequest(input: ChatInput, config: ChatBackendConfig) {
   const useLlama = input.model === 'gemma4:e4b' && Boolean(config.llamaChatUrl?.trim());
   const url = useLlama
     ? `${config.llamaChatUrl!.trim().replace(/\/+$/, '')}/chat/completions`
@@ -67,7 +65,13 @@ export async function proxyAiChat(
     ...(input.max_tokens !== undefined ? { max_tokens: input.max_tokens } : {}),
     chat_template_kwargs: { enable_thinking: input.think ?? true },
   } : {
-    model: input.model, messages: input.messages, stream: input.stream,
+    model: input.model, messages: input.messages.map(message => ({
+      role: message.role,
+      content: typeof message.content === 'string' ? message.content : message.content.filter(part => part.type === 'text').map(part => part.text).join('\n'),
+      ...(typeof message.content !== 'string' && message.content.some(part => part.type === 'image_url') ? {
+        images: message.content.filter(part => part.type === 'image_url').map(part => part.image_url.url.slice(part.image_url.url.indexOf(',') + 1)),
+      } : {}),
+    })), stream: input.stream,
     ...(input.think !== undefined ? { think: input.think } : {}),
     keep_alive: -1,
     options: {
@@ -75,6 +79,14 @@ export async function proxyAiChat(
       ...(input.max_tokens !== undefined ? { num_predict: input.max_tokens } : {}),
     },
   };
+  return { url, payload, useLlama };
+}
+
+export async function proxyAiChat(
+  req: Request, res: Response, input: ChatInput, config: ChatBackendConfig,
+  fetchUpstream: typeof fetch = fetch,
+): Promise<void> {
+  const { url, payload, useLlama } = chatBackendRequest(input, config);
   const controller = new AbortController();
   // IncomingMessage.close can fire after receiving the POST body, before generation.
   const onClose = () => { if (!res.writableEnded) controller.abort(); };

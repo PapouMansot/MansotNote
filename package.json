@@ -12,6 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test:multiuser": "node scripts/test-multiuser.mjs",
     "test:soul": "node scripts/test-soul.mjs",
+    "test:chat-attachments": "node scripts/test-chat-attachments.mjs",
+    "test:ai-correction": "node scripts/test-ai-correction.mjs",
     "smoke": "esbuild src/lib/export.ts src/lib/ai.ts src/store/app-store.ts src/store/persist.ts src/hooks/useKeyboardShortcuts.ts --bundle --format=esm --platform=node \"--alias:@=./src\" \"--define:import.meta.env={}\" --outdir=node_modules/.cache/smoke && node scripts/smoke-pass1.mjs",
     "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/index.mjs",
     "start:server": "node dist-server/index.mjs"
@@ -30,6 +32,7 @@
     "lucide-react": "^0.469.0",
     "marked": "^15.0.6",
     "nanoid": "^5.0.9",
+    "pdfjs-dist": "6.4.299",
     "pg": "^8.23.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

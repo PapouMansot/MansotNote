@@ -18,6 +18,8 @@ import {
   Trash2,
 } from 'lucide-react';
 import { copyText } from '@/lib/clipboard';
+import { useAppStore } from '@/store/app-store';
+import { getSoul } from '@/lib/soul';
 import type { BlockTransformType, MarkdownBlock } from '@/lib/markdown-block';
 
 export interface MarkdownContextMenuProps {
@@ -46,6 +48,7 @@ export function MarkdownContextMenu({
   onClose,
 }: MarkdownContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const assistantName = useAppStore((s) => getSoul(s.data.settings).assistantName);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -139,7 +142,7 @@ export function MarkdownContextMenu({
       {/* Actions IA */}
       <div className="my-1 border-t border-zinc-100 dark:border-zinc-800" />
       <div className="px-2.5 py-0.5 text-[10px] font-semibold text-indigo-600 dark:text-indigo-400">
-        Assistant IA (SIA)
+        Assistant IA ({assistantName})
       </div>
       <Item
         icon={<Sparkles size={13} className="text-amber-500" />}

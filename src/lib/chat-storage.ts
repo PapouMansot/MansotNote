@@ -7,11 +7,13 @@
 import { STORAGE_KEYS } from '@/constants';
 import { accountStorageKey, getBrowserUser } from '@/lib/browser-user';
 import type { ActionProposal } from '@/components/ai/AiChatDrawer';
+import type { ChatAttachment } from '@/lib/chat-attachments';
 
 export interface ChatTurn {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  attachments?: ChatAttachment[];
   reasoning?: string;
   isStreaming?: boolean;
   action?: ActionProposal;
@@ -26,7 +28,7 @@ export interface ChatConversation {
 }
 
 export const INITIAL_WELCOME_CONTENT =
-  '👋 Salut ! Je suis **SIA**, ton assistante IA personnelle et copilote de productivité.\n\nJe suis directement connectée à toutes tes **notes**, tes **tâches Kanban** et ta **note active**.\n\nPose-moi une question, demande-moi de rédiger, d’ajouter à une note, de corriger ou de planifier tes actions !';
+  '👋 Salut ! Je suis ton assistante IA personnelle et copilote de productivité.\n\nJe suis directement connectée à toutes tes **notes**, tes **tâches Kanban** et ta **note active**.\n\nPose-moi une question, demande-moi de rédiger, d’ajouter à une note, de corriger ou de planifier tes actions !';
 
 export function createNewConversation(title = 'Nouvelle conversation', welcome = INITIAL_WELCOME_CONTENT): ChatConversation {
   const now = Date.now();

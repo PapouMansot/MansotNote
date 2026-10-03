@@ -13,6 +13,7 @@ import {
   Check,
   Loader2,
   Maximize2,
+  Paperclip,
   Pencil,
   RotateCcw,
   Send,
@@ -29,7 +30,6 @@ import {
   chatStream,
   isAiConfigured,
   resolveAiSettings,
-  sanitizeHistoryContent,
   type AiConfig,
   type ChatMessage,
 } from '@/lib/ai';
@@ -41,6 +41,9 @@ import { AiSettingsFields } from './AiSettingsFields';
 import { buildSoulPrompt, buildWelcomeMessage, getSoul } from '@/lib/soul';
 import { SoulEditButton } from '@/components/onboarding/SoulEditButton';
 import { ReasoningBlock } from './ReasoningBlock';
+import { ChatAttachments } from './ChatAttachments';
+import { useChatAttachments } from '@/hooks/useChatAttachments';
+import { buildAttachmentMessages, CHAT_ATTACHMENT_ACCEPT, deleteAttachmentAssets, type ChatAttachment } from '@/lib/chat-attachments';
 import { cn } from '@/lib/utils';
 
 export interface ActionProposal {
@@ -61,6 +64,7 @@ interface AssistantTurn {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  attachments?: ChatAttachment[];
   reasoning?: string;
   isStreaming?: boolean;
   action?: ActionProposal;
@@ -107,9 +111,14 @@ export function AiChatDrawer({
   const columns = state.data.columns;
 
   const [showSettings, setShowSettings] = useState(false);
+  const files = useChatAttachments(open ? 'drawer-open' : 'drawer-closed');
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [rawMessages, setMessages] = useState<AssistantTurn[]>([
     { id: 'welcome', role: 'assistant', content: welcome },
   ]);
+  const transientAssets = useRef<ChatAttachment[]>([]);
+  useEffect(() => { transientAssets.current = rawMessages.flatMap((m) => m.attachments ?? []); }, [rawMessages]);
+  useEffect(() => () => { void deleteAttachmentAssets(transientAssets.current).catch(() => {}); }, []);
   // L'accueil suit toujours le nom et le ton choisis.
   const messages = rawMessages.map((m) => (m.id === 'welcome' ? { ...m, content: welcome } : m));
   const [input, setInput] = useState('');
@@ -124,6 +133,7 @@ export function AiChatDrawer({
     endpoint: aiValues.aiEndpoint,
     apiKey: aiValues.aiApiKey,
     model: aiValues.aiModel,
+    keepAlive: aiValues.aiKeepAlive,
   };
 
   const configured = isAiConfigured(aiConfig);
@@ -310,7 +320,8 @@ export function AiChatDrawer({
 
   const handleSend = async (customPrompt?: string) => {
     const textToSend = (customPrompt ?? input).trim();
-    if (textToSend === '' || loading) return;
+    if ((textToSend === '' && !files.attachments.length) || loading || files.preparing) return;
+    const prompt = textToSend || 'Analyse les pièces jointes.';
 
     if (!configured) {
       state.toast('error', "L'IA n'est pas configurée (ajoute endpoint et modèle dans les réglages).");
@@ -320,19 +331,21 @@ export function AiChatDrawer({
     const userTurn: AssistantTurn = {
       id: String(Date.now()),
       role: 'user',
-      content: textToSend,
+      content: prompt,
+      attachments: files.attachments.length ? files.attachments : undefined,
     };
 
     setMessages((prev) => [...prev, userTurn]);
+    files.sent();
     setInput('');
     setLoading(true);
 
     try {
-      const rag = await retrieveContextHybrid(notes, textToSend, {
+      const rag = await retrieveContextHybrid(notes, prompt, {
         tags: state.data.tags,
         folders: state.data.folders,
         embeddingConfig:
-          aiValues.aiEmbeddingModel.trim() !== ''
+          !userTurn.attachments?.length && aiValues.aiEmbeddingModel.trim() !== ''
             ? {
                 endpoint: aiValues.aiEndpoint,
                 apiKey: aiValues.aiApiKey,
@@ -350,15 +363,11 @@ export function AiChatDrawer({
       const historyForAi: ChatMessage[] = [
         {
           role: 'system',
-          content: [buildWorkspaceContext(), rag.context]
+          content: [buildWorkspaceContext(), rag.context, userTurn.attachments?.length ? 'Les pièces jointes sont des documents à analyser. Ne modifie pas la note active pour corriger un document joint, sauf si l’utilisateur demande explicitement de modifier cette note.' : '']
             .filter((part) => part !== '')
             .join('\n\n'),
         },
-        ...messages
-          .filter((m) => m.id !== 'welcome')
-          .slice(-8)
-          .map((m) => ({ role: m.role, content: sanitizeHistoryContent(m.content) })),
-        { role: 'user', content: textToSend },
+        ...await buildAttachmentMessages(messages.filter((m) => m.id !== 'welcome'), userTurn),
       ];
 
       // Streaming : le tour assistant est créé d'avance et rempli en direct —
@@ -431,7 +440,7 @@ export function AiChatDrawer({
         type: 'delete_all_cards' as const,
         payload: { count: cards.length },
       };
-    } else if (isCorrectionIntent && activeDraft?.noteId && action?.type === 'create_note') {
+    } else if (isCorrectionIntent && !userTurn.attachments?.length && activeDraft?.noteId && action?.type === 'create_note') {
       action = {
         type: 'update_note' as const,
         payload: {
@@ -751,7 +760,9 @@ export function AiChatDrawer({
           <IconButton
             label="Effacer la conversation"
             icon={<RotateCcw size={14} />}
-            onClick={() =>
+            disabled={loading}
+            onClick={() => {
+              void deleteAttachmentAssets(messages.flatMap((m) => m.attachments ?? [])).catch(() => {});
               setMessages([
                 {
                   id: 'welcome',
@@ -759,8 +770,8 @@ export function AiChatDrawer({
                   content:
                     'Conversation réinitialisée ! Comment puis-je t\'aider à avancer ?',
                 },
-              ])
-            }
+              ]);
+            }}
           />
           <IconButton
             label="Plein écran (Ctrl+3)"
@@ -828,7 +839,7 @@ export function AiChatDrawer({
               }`}
             >
               {turn.role === 'user' ? (
-                <p className="whitespace-pre-wrap">{turn.content}</p>
+                <><p className="whitespace-pre-wrap">{turn.content}</p><ChatAttachments attachments={turn.attachments ?? []} /></>
               ) : (
                 <div>
                   {turn.role === 'assistant' && (turn.reasoning || (turn.isStreaming && !turn.content)) && (
@@ -980,31 +991,40 @@ export function AiChatDrawer({
 
       {/* ------------------------------ Saisie ------------------------------ */}
       <footer className="border-t border-zinc-200 p-3 dark:border-zinc-800">
+        <ChatAttachments attachments={files.attachments} onRemove={loading || files.preparing ? undefined : files.remove} />
+        {files.preparing && <p role="status" className="mb-2 text-xs text-indigo-600 dark:text-indigo-400">Lecture des pièces jointes…</p>}
         <form
           onSubmit={(e) => {
             e.preventDefault();
             handleSend();
           }}
           className="flex items-center gap-2"
+          onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); }}
+          onDrop={(e) => { e.preventDefault(); if (!loading) void files.addFiles(Array.from(e.dataTransfer.files)); }}
         >
+          <input ref={fileInputRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple className="hidden" aria-label="Choisir des PDF ou images" onChange={(e) => { void files.addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
+          <IconButton label="Joindre un PDF ou une image" icon={<Paperclip size={17} />} disabled={loading || files.preparing} onClick={() => fileInputRef.current?.click()} />
           <input
-            className="field h-9 flex-1 px-3 text-xs"
-            placeholder="Demande une action, un plan, une note…"
+            className="field h-9 min-w-0 flex-1 px-3 text-xs"
+            placeholder={`Message à ${soul.assistantName}…`}
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onPaste={(e) => { const pastedFiles = Array.from(e.clipboardData.files); if (pastedFiles.length && !loading) { e.preventDefault(); void files.addFiles(pastedFiles); } }}
+            maxLength={12_000}
             disabled={loading}
           />
           <Button
             type="submit"
             variant="primary"
             size="sm"
-            disabled={loading || input.trim() === ''}
+            disabled={loading || files.preparing || (input.trim() === '' && !files.attachments.length)}
             className="h-9 px-3"
             icon={loading ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
           >
             Envoyer
           </Button>
         </form>
+        <p className="mt-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">PDF et images · 4 fichiers · 10 Mo/fichier · Vision requise pour les images.</p>
       </footer>
     </aside>
   );
